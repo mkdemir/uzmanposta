@@ -169,3 +169,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Uzman Posta
+output/*
+launch.json
+*position.txt

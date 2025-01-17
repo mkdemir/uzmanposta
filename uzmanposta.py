@@ -154,7 +154,7 @@ class MailLogger:
         attempt = 0
         while attempt < retries:
             try:
-                response = requests.get(self.url, headers=headers, params=params)
+                response = requests.get(self.url, headers=headers, params=params, timeout=120)
                 response.raise_for_status()  # If there's an error, it will raise an exception
                 data = response.json()  # Parse the response as JSON
                 # return data
@@ -200,7 +200,7 @@ class MailLogger:
         attempt = 0
         while attempt < retries:
             try:
-                response = requests.get(detailed_log_url, headers={'Authorization': f'Bearer {self.api_key}'})
+                response = requests.get(detailed_log_url, headers={'Authorization': f'Bearer {self.api_key}'}, timeout=120)
                 response.raise_for_status()
                 detailed_log = response.json()
                 
