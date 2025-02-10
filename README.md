@@ -6,7 +6,7 @@
 
 ## Overview
 
-The Uzman Posta Mail Event Logger is a Python-based script designed to collect and log mail events (both incoming and outgoing) from the Uzman Posta API. This tool allows users to efficiently monitor and analyze mail operations by storing log data in structured files.
+The **Uzman Posta Mail Event Logger** is a Python-based script designed to collect and log mail events (both incoming and outgoing) from the Uzman Posta API. This tool helps users efficiently monitor and analyze mail operations by storing log data in structured files.
 
 ## Objective
 
@@ -17,8 +17,8 @@ This project retrieves mail event logs using the Uzman Posta API and stores them
 Before using this project, ensure the following requirements are met:
 
 - Access to the Uzman Posta API and its documentation.
-- A Bearer access token for API authentication.
-- Python environment with required dependencies installed.
+- A **Bearer access token** for API authentication.
+- A Python environment with the required dependencies installed.
 
 ## Installation
 
@@ -44,51 +44,57 @@ The `MailLogger` class handles the following operations:
 - Logging errors and saving progress for recovery.
 - Supporting detailed log fetching for specific events.
 
+## Configuration
+
+The **uzmanposta_email.ini** file contains the configuration settings required for the script to run. Below is an example configuration file:
+
+```ini
+; Mail Logger Configuration File
+; Last updated: 2025
+
+[Mail]
+; API authentication key
+api_key = xxxxxxxxxxxxxxxxxxxxxxx
+
+; Output directory and file settings
+log_directory = ./output
+log_file_name_format = uzmanposta-mail_%%Y-%%m-%%d-%%H-%%M.json
+position_file = ./uzmanposta-mail_position.txt
+
+; Time settings
+start_time = 1738911600
+split_interval = 300
+max_time_gap = 3600
+
+; API endpoint configuration
+domain = domain.com.tr
+url = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+type = outgoinglog
+
+; Additional settings
+lock_file_path = ./uzmanposta-mail.lock
+verbose = true
+message_log_file_name = messages.log
+```
+
 ## Usage
 
 Run the script using the following command:
 
 ```bash
-python mail_logger.py \
-  --api_key <your_api_key> \
-  --log_directory <log_directory> \
-  --log_file_name_format <log_file_name_format> \
-  --position_file <position_file_path> \
-  --start_time <start_time_unix> \
-  --domain <domain_or_email> \
-  --url <api_url> \
-  --log_type <log_type> \
-  --split_interval <split_interval_seconds> \
-  --max_time_gap <max_time_gap_seconds>
+python3 uzmanposta_mail.py
 ```
 
-### Parameters
-
-- `--api_key`: API key for accessing the Uzman Posta API.
-- `--log_directory`: Directory where log files will be saved.
-- `--log_file_name_format`: Format for log file names (e.g., `uzman_posta_mail_%Y%m%d%H%M.json`).
-- `--position_file`: File to store the last retrieved timestamp for continuing log retrieval.
-- `--start_time`: Start time for retrieving logs (Unix timestamp).
-- `--domain`: Domain or email address for which logs are retrieved.
-- `--url`: API endpoint URL for mail logs.
-- `--log_type`: Type of logs to retrieve (`incominglog` or `outgoinglog`).
-- `--split_interval`: Time interval (in seconds) for splitting requests.
-- `--max_time_gap`: Maximum time range (in seconds) for a single request.
-
-### Example
+For scheduled execution with **cron**, add the following line to your crontab:
 
 ```bash
-python mail_logger.py \
-  --api_key d1cs3-2312d!234323 \
-  --log_directory /home/user/output \
-  --log_file_name_format uzman_posta_mail_%Y%m%d%H%M.json \
-  --position_file /home/user/output/position.txt \
-  --start_time 1712131157 \
-  --domain example.com \
-  --url https://yenipanel-api.uzmanposta.com/api/v2/logs/mail \
-  --log_type incominglog \
-  --split_interval 3600 \
-  --max_time_gap 86400
+* * * * * /usr/bin/python3 /home/temp/uzmanposta/uzmanposta_mail.py
+```
+
+Note: If the script does not start, you can get the error output with this command
+
+```bash
+* * * * * /usr/bin/python3 /home/temp/uzmanposta/uzmanposta_mail.py >> /home/temp/uzmanposta/uzmanposta-cron.log 2>&1
 ```
 
 ## Class Overview: `MailLogger`
@@ -121,7 +127,7 @@ python mail_logger.py \
 
 ## Authentication
 
-Include the Bearer token in the `Authorization` header of API requests:
+Include the **Bearer token** in the `Authorization` header of API requests:
 
 ```json
 Authorization: Bearer <api_key>
@@ -133,7 +139,3 @@ Authorization: Bearer <api_key>
 - Validate script parameters to ensure proper execution.
 - Test in a development environment before deploying to production.
 - Check firewall settings to allow API requests.
-
-## Support
-
-For issues or questions, refer to the Uzman Posta API documentation or contact support.

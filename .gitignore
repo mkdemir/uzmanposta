@@ -174,3 +174,4 @@ cython_debug/
 output/*
 launch.json
 *position.txt
+*ini
