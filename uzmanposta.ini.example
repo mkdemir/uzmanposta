@@ -1,0 +1,101 @@
+# =============================================================================
+# UZMAN POSTA MAIL LOGGER CONFIGURATION
+# =============================================================================
+# This file contains the configuration for the Uzman Posta Mail Logger service.
+# It supports multiple domains and log types through dedicated sections.
+# =============================================================================
+
+[DEFAULT]
+# --- API & Core Settings ---
+# url can be set here to override all sections, 
+# but it is recommended to let the script handle it via 'category' 
+# or set it explicitly in each section.
+# log_directory               = ./output
+# max_records_per_page        = 1000
+# log_file_name_format        = {domain}_{type}_%Y-%m-%d_%H.log
+
+# --- Resource & Performance Optimization ---
+# max_parallel_details: Number of concurrent API requests for log details.
+# Keep this value low (2-5) to minimize RAM and CPU usage.
+# max_parallel_details        = 2
+# use_session                 = True
+
+# --- Error Handling & Retries ---
+# list_retries: How many times to retry the main log list if it fails.
+# list_retries                = 10
+# list_sleep_time             = 2
+# detail_retries: How many times to retry a specific mail's details.
+# detail_retries              = 10
+# detail_sleep_time           = 2
+
+# --- Time Range & Intervals ---
+# split_interval: Chunk size for log retrieval in seconds (300 = 5 mins).
+# split_interval              = 300
+# max_time_gap: Maximum look-back window allowed per section.
+# max_time_gap                = 3600
+
+# --- Logging & Monitoring ---
+# verbose                     = True
+# message_log_file_name       = messages_%Y-%m-%d_%H.log
+# message_log_retention_count = 2
+# heartbeat_file              = {section}_heartbeat.json
+# error_log_file_name       = errors_%Y-%m-%d_%H.log
+# error_log_retention_count = 2
+
+# =============================================================================
+# DOMAIN CONFIGURATIONS
+# =============================================================================
+# Add your domain sections below. 
+# Format: [MailLogger:any-unique-suffix]
+# =============================================================================
+
+# --- Section 1: Incoming Logs ---
+[MailLogger:example-incoming]
+api_key              = YOUR_API_KEY_HERE
+url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+domain               = example.com
+category             = mail
+type                 = incominglog
+start_time           = 1703240000
+# log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
+
+# --- Section 2: Outgoing Logs ---
+[MailLogger:example-outgoing]
+api_key              = YOUR_API_KEY_HERE
+url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+domain               = example.com
+category             = mail
+type                 = outgoinglog
+start_time           = 1703240000
+# log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
+
+# =============================================================================
+# EXTENDED LOG TYPES (QUARANTINE & AUTHENTICATION)
+# =============================================================================
+# Use 'category' to switch between log sets.
+# Valid categories: mail (default), quarantine, authentication
+# =============================================================================
+
+# --- Section 3: Quarantine Logs ---
+[MailLogger:example-quarantine]
+api_key              = YOUR_API_KEY_HERE
+url                  = https://yenipanel-api.uzmanposta.com/api/v2/quarantines
+domain               = example.com
+category             = quarantine
+# type can be: quarantine, hold
+type                 = quarantine
+start_time           = 1703240000
+# log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
+
+# --- Section 4: Authentication Logs ---
+[MailLogger:example-auth]
+api_key              = YOUR_API_KEY_HERE
+url                  = https://yenipanel.uzmanposta.com/api/v2/logs/authentication
+domain               = example.com
+category             = authentication
+start_time           = 1703240000
+# log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
+
+# =============================================================================
+# END OF CONFIGURATION
+# =============================================================================
