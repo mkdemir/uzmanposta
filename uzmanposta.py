@@ -916,6 +916,17 @@ class MailLogger:
         
         self.log_message(f"Start time: {start_time} ({datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')})")
         
+        # Enforce 7-day limit for quarantine category
+        if self.config.api_category == 'quarantine':
+            seven_days_ago = int(datetime.now().timestamp()) - (7 * 24 * 60 * 60)
+            if start_time < seven_days_ago:
+                self.log_message(
+                    f"WARNING: Quarantine logs have a 7-day lookback limit. "
+                    f"Clipping start_time from {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"to {datetime.fromtimestamp(seven_days_ago).strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                start_time = seven_days_ago
+
         # Validate: start_time cannot be greater than end_time
         if start_time >= endtime:
             self.log_message(f"WARNING: start_time ({start_time}) is greater than or equal to end_time ({endtime}). Skipping log retrieval.")

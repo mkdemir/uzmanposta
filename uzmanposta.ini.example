@@ -83,7 +83,8 @@ start_time           = 1703240000
 # --- Section 3: Quarantine Logs ---
 [MailLogger:example-quarantine]
 api_key              = YOUR_API_KEY_HERE
-url                  = https://yenipanel-api.uzmanposta.com/api/v2/quarantines
+# Note: Quarantine logs have a strict 7-day lookback limit.
+url                  = https://yenipanel.uzmanposta.com/api/v2/queue
 domain               = example.com
 category             = quarantine
 # type can be: quarantine, hold
@@ -96,7 +97,7 @@ start_time           = 1703240000
 #       If specified, it defaults to 'outgoinglog' but is typically ignored by the API.
 [MailLogger:example-auth]
 api_key              = YOUR_API_KEY_HERE
-url                  = https://yenipanel.uzmanposta.com/api/v2/logs/authentication
+url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication
 domain               = example.com
 category             = authentication
 start_time           = 1703240000
