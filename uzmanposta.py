@@ -39,7 +39,6 @@ class MailLoggerConfig:
     api_key: str
     log_directory: str
     position_file: str
-    position_file: str
     url: str
     start_time: int = 0
     log_file_name_format: str = '{domain}_{type}_%Y-%m-%d_%H.log'
@@ -456,7 +455,9 @@ class MailLogger:
             # Replace placeholders
             display_domain = self.config.domain if self.config.domain else 'global'
             filename_format = filename_format.replace('{domain}', display_domain)
-            filename_format = filename_format.replace('{type}', self.config.log_type)
+            # For authentication, use 'auth' instead of the default log_type
+            type_value = 'auth' if self.config.api_category == 'authentication' else self.config.log_type
+            filename_format = filename_format.replace('{type}', type_value)
             
             return os.path.join(self.config.log_directory, datetime.now().strftime(filename_format))
         except ValueError as e:
@@ -597,8 +598,10 @@ class MailLogger:
             params = {
                 'starttime': s,
                 'endtime': e,
-                'type': self.config.log_type
             }
+            # Only include 'type' for categories that use it (mail, quarantine)
+            if self.config.api_category != 'authentication':
+                params['type'] = self.config.log_type
             if self.config.domain:
                 params['domain'] = self.config.domain
                 
@@ -912,6 +915,12 @@ class MailLogger:
             start_time = self.config.start_time
         
         self.log_message(f"Start time: {start_time} ({datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')})")
+        
+        # Validate: start_time cannot be greater than end_time
+        if start_time >= endtime:
+            self.log_message(f"WARNING: start_time ({start_time}) is greater than or equal to end_time ({endtime}). Skipping log retrieval.")
+            return
+        
         time_diff = endtime - start_time
         fourteen_days_seconds = 14 * 24 * 60 * 60
         max_allowed_gap = min(self.config.max_time_gap, fourteen_days_seconds)
@@ -1122,6 +1131,11 @@ if __name__ == "__main__":
         
         # Read values with fallbacks from DEFAULT section
         api_key = cfg.get(section_name, 'api_key')
+        
+        # Validate: API key cannot be empty
+        if not api_key or api_key.strip() == '' or api_key == 'YOUR_API_KEY_HERE':
+            raise ValueError(f"Section {section_name}: 'api_key' is required and cannot be empty or placeholder.")
+        
         domain = cfg.get(section_name, 'domain', fallback='')
         log_type = cfg.get(section_name, 'type', fallback='outgoinglog')
         api_category = cfg.get(section_name, 'category', fallback='mail')
@@ -1167,7 +1181,17 @@ if __name__ == "__main__":
         # Construct detailed log directory: base/domain/category/type
         # If domain is empty (auth/quarantine might be global), use 'global'
         display_domain = domain if domain else 'global'
-        log_directory = os.path.join(base_log_dir, display_domain, api_category, log_type)
+        
+        # For authentication category, skip the type subdirectory since it's not applicable
+        # For quarantine, skip if type equals category to avoid quarantine/quarantine
+        if api_category == 'authentication':
+            log_directory = os.path.join(base_log_dir, display_domain, api_category)
+        elif api_category == 'quarantine' and log_type == 'quarantine':
+            # Avoid redundant quarantine/quarantine path
+            log_directory = os.path.join(base_log_dir, display_domain, api_category)
+        else:
+            # mail category always uses type, quarantine with 'hold' type uses subdirectory
+            log_directory = os.path.join(base_log_dir, display_domain, api_category, log_type)
         
         # Generate stable instance id for this section
         unique_id_string = f"{api_key}{domain}{log_type}{api_category}{url}"
@@ -1231,7 +1255,7 @@ if __name__ == "__main__":
             log_directory=log_directory,
             log_file_name_format=cfg.get(section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
             position_file=position_file,
-            start_time=cfg.getint(section_name, 'start_time', fallback=int(datetime.now().timestamp())),
+            start_time=max(0, cfg.getint(section_name, 'start_time', fallback=int(datetime.now().timestamp()))),
             domain=domain,
             url=url,
             log_type=log_type,

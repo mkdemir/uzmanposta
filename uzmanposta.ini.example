@@ -13,6 +13,10 @@
 # log_directory               = ./output
 # max_records_per_page        = 1000
 # log_file_name_format        = {domain}_{type}_%Y-%m-%d_%H.log
+# type: Log type to retrieve. If not specified, defaults to 'outgoinglog'.
+#       Valid values for 'mail' category: incominglog, outgoinglog
+#       Valid values for 'quarantine' category: quarantine, hold
+#       For 'authentication' category, type is ignored.
 
 # --- Resource & Performance Optimization ---
 # max_parallel_details: Number of concurrent API requests for log details.
@@ -39,8 +43,8 @@
 # message_log_file_name       = messages_%Y-%m-%d_%H.log
 # message_log_retention_count = 2
 # heartbeat_file              = {section}_heartbeat.json
-# error_log_file_name       = errors_%Y-%m-%d_%H.log
-# error_log_retention_count = 2
+# error_log_file_name         = errors_%Y-%m-%d_%H.log
+# error_log_retention_count   = 2
 
 # =============================================================================
 # DOMAIN CONFIGURATIONS
@@ -88,6 +92,8 @@ start_time           = 1703240000
 # log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
 
 # --- Section 4: Authentication Logs ---
+# Note: 'type' is not required for authentication logs. 
+#       If specified, it defaults to 'outgoinglog' but is typically ignored by the API.
 [MailLogger:example-auth]
 api_key              = YOUR_API_KEY_HERE
 url                  = https://yenipanel.uzmanposta.com/api/v2/logs/authentication
