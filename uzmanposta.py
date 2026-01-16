@@ -1266,7 +1266,7 @@ if __name__ == "__main__":
             log_directory=log_directory,
             log_file_name_format=cfg.get(section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
             position_file=position_file,
-            start_time=max(0, cfg.getint(section_name, 'start_time', fallback=int(datetime.now().timestamp()))),
+            start_time=max(0, cfg.getint(section_name, 'start_time', fallback=int(datetime.now().timestamp()) - 60)),
             domain=domain,
             url=url,
             log_type=log_type,
