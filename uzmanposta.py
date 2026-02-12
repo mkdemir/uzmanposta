@@ -29,7 +29,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
+import requests  # pylint: disable=import-error
 
 if os.name == 'nt':
     import msvcrt # pylint: disable=import-error
@@ -563,6 +563,8 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         except IOError as e:
             self.log_error(f"Failed to update heartbeat: {e}")
 
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks
     def retrieve_logs(self, starttime: int, endtime: int, retries: Optional[int] = None,
                       sleep_time: Optional[int] = None, chunk_size: int = 500) -> int:
         """
@@ -1539,7 +1541,7 @@ def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
 
 def main() -> None:
     """Main entry point for Uzman Posta Mail Event Logger."""
-    import argparse
+    import argparse # pylint: disable=import-outside-toplevel
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Uzman Posta Mail Event Logger')
