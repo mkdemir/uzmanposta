@@ -565,7 +565,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
 
     # pylint: disable=too-many-arguments,too-many-locals
     # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks
-    def retrieve_logs(self, starttime: int, endtime: int, retries: Optional[int] = None,
+    def retrieve_logs(self, starttime: int, endtime: int, *, retries: Optional[int] = None,
                       sleep_time: Optional[int] = None, chunk_size: int = 500) -> int:
         """
         Retrieves mail logs from API within specified time range.
@@ -876,8 +876,9 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         return total_processed
 
     # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    def retrieve_detailed_log(self, queue_id: str, event_time: int, retries: Optional[int] = None,
-                             sleep_time: Optional[int] = None) -> Dict[str, Any]:
+    def retrieve_detailed_log(
+            self, queue_id: str, event_time: int, *,
+            retries: Optional[int] = None, sleep_time: Optional[int] = None) -> Dict[str, Any]:
         """
         Retrieves detailed log information for specific mail event.
 
