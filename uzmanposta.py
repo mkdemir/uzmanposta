@@ -14,6 +14,7 @@ Reference: https://mxlayer.stoplight.io/
 import os
 import sys
 import json
+import socket
 import configparser
 import logging
 import hashlib
@@ -23,6 +24,7 @@ import threading
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -630,7 +632,7 @@ class MailLogger:
                     try:
                         data = response.json()
                     except ValueError:
-                        self.log_error(f"JSON decode error: {response.text}")
+                        self.log_error(f"JSON decode error: {response.text}", request_info=response.url)
                         raise
                     count_all = len(data)
                     self.log_message(f"Retrieved {count_all} logs for range [{s}, {e}]")
@@ -751,7 +753,7 @@ class MailLogger:
                     detailed_error = self._parse_api_error(http_error.response)
                     # Include the URL that caused the error
                     url_with_params = http_error.response.url if http_error.response is not None else self.config.url
-                    self.log_error(f"API HTTP Error for URL {url_with_params} (attempt {attempt}): {detailed_error}")
+                    self.log_error(f"API HTTP Error for URL {url_with_params} (attempt {attempt}): {detailed_error}", request_info=url_with_params)
                     if attempt < retries:
                         delay = min(sleep_time * (2 ** (attempt - 1)), 60)
                         MailLogger._shutdown_event.wait(delay)
@@ -760,7 +762,13 @@ class MailLogger:
                     self.metrics.errors_count += 1
                     # Try to get URL from request if available
                     failed_url = getattr(req_error.request, 'url', self.config.url) if hasattr(req_error, 'request') else self.config.url
-                    self.log_error(f"Error retrieving logs from {failed_url} (attempt {attempt}): {req_error}")
+                    
+                    # Detect DNS failure
+                    if isinstance(req_error, requests.exceptions.ConnectionError) and not self._check_dns(failed_url):
+                        self.log_error(f"DNS Resolution Failed for {failed_url}. Please check your internet connection or DNS settings.", request_info=failed_url)
+                    else:
+                        self.log_error(f"Error retrieving logs from {failed_url} (attempt {attempt}): {req_error}", request_info=failed_url)
+                    
                     if attempt < retries:
                         # Exponential backoff with cap
                         delay = min(sleep_time * (2 ** (attempt - 1)), 60)
@@ -768,7 +776,7 @@ class MailLogger:
                 except ValueError:
                     raise
                 except Exception as unexpected_error:
-                    self.log_error(f"Unexpected error: {unexpected_error}")
+                    self.log_error(f"Unexpected error: {unexpected_error}", request_info=self.config.url)
                     self.metrics.errors_count += 1
                     raise
             
@@ -832,7 +840,7 @@ class MailLogger:
                 try:
                     detailed_log = response.json()
                 except ValueError:
-                    self.log_error(f"JSON decode error: {response.text}")
+                    self.log_error(f"JSON decode error: {response.text}", request_info=response.url)
                     raise
                 # Successful retrieval
                 # List of fields to remove from the detailed log
@@ -852,22 +860,48 @@ class MailLogger:
                 if attempt < retries:
                     MailLogger._shutdown_event.wait(sleep_time)
                 else:
-                    self.log_error(f"API HTTP Error for URL {url_with_params} after {retries} attempts: {detailed_error}")
+                    self.log_error(f"API HTTP Error for URL {url_with_params} after {retries} attempts: {detailed_error}", request_info=url_with_params)
                     raise
             except Exception as detail_error:
                 attempt += 1
                 if attempt < retries:
                     MailLogger._shutdown_event.wait(sleep_time)  # Sleep before retrying
                 else:
-                    self.log_error(f"Failed to retrieve detailed log from {detailed_log_url} after {retries} attempts: {detail_error}")
+                    # Detect DNS failure
+                    if isinstance(detail_error, requests.exceptions.ConnectionError) and not self._check_dns(detailed_log_url):
+                        self.log_error(f"DNS Resolution Failed for {detailed_log_url}. Please check your internet connection or DNS settings.", request_info=detailed_log_url)
+                    else:
+                        self.log_error(f"Failed to retrieve detailed log from {detailed_log_url} after {retries} attempts: {detail_error}", request_info=detailed_log_url)
                     raise
 
-    def log_error(self, error_message: str) -> None:
+    def _check_dns(self, url: str) -> bool:
+        """
+        Verifies if the hostname in the URL can be resolved.
+        
+        Args:
+            url: The URL to check
+            
+        Returns:
+            True if hostname resolves or URL is invalid/no hostname, False if DNS resolution fails
+        """
+        try:
+            hostname = urlparse(url).hostname
+            if hostname:
+                socket.gethostbyname(hostname)
+                return True
+        except socket.gaierror:
+            return False
+        except Exception:
+            return True # If something else fails, assume True to fallback to original error
+        return True
+
+    def log_error(self, error_message: str, request_info: Optional[str] = None) -> None:
         """
         Logs error messages to file with timestamp.
 
         Args:
             error_message: Error message to log
+            request_info: Optional request URL or information
         """
         error_data = {
             "time": int(datetime.now().timestamp()),
@@ -876,6 +910,8 @@ class MailLogger:
             "domain": self.config.domain,
             "type": self.config.log_type
         }
+        if request_info:
+            error_data["request"] = request_info
         error_json = json.dumps(error_data, ensure_ascii=False)
         
         # Use timestamped filename if pattern has date tokens
@@ -1029,7 +1065,7 @@ class MailLogger:
                 prefix = f"[{self.config.section_name}] " if self.config.section_name else ""
                 print(f"[{timestamp}] {prefix}Lock released")
         except Exception as e:
-            self.log_error(f"Error releasing lock: {e}")
+            self.log_error(f"Error releasing lock: {e}", request_info=self.lock_file_path)
             raise
 
     def process_logs(self, logs: List[Dict[str, Any]]) -> None:
