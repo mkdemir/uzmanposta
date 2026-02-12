@@ -11,6 +11,8 @@ This module provides functionality to:
 Reference: https://mxlayer.stoplight.io/
 """
 
+# pylint: disable=too-many-lines
+
 import os
 import sys
 import json
@@ -30,13 +32,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 if os.name == 'nt':
-    import msvcrt
+    import msvcrt # pylint: disable=import-error
 else:
-    import fcntl
+    import fcntl # pylint: disable=import-error
 
 
 @dataclass
-class MailLoggerConfig:
+class MailLoggerConfig: # pylint: disable=too-many-instance-attributes
     """Configuration dataclass for MailLogger settings."""
     api_key: str
     log_directory: str
@@ -132,7 +134,7 @@ class Metrics:
         }
 
 
-class MailLogger:
+class MailLogger: # pylint: disable=too-many-instance-attributes
     """
     Manages mail event logging from Uzman Posta API.
 
@@ -397,7 +399,7 @@ class MailLogger:
                 os.remove(os.path.join(message_dir, fname))
                 if hasattr(self, "message_logger"):
                     self.message_logger.info("Removed old message log: %s", fname)
-            except Exception as _e:
+            except Exception as _e: # pylint: disable=broad-exception-caught
                 self.log_error(f"Failed to delete old message log {fname}: {_e}")
 
     def cleanup_old_error_logs(self, retention_count: int = 2) -> None:
@@ -517,7 +519,7 @@ class MailLogger:
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
-                except Exception:
+                except Exception: # pylint: disable=broad-exception-caught
                     pass
 
     def load_last_position(self) -> Optional[int]:
@@ -701,7 +703,8 @@ class MailLogger:
                             chunk_details = [job_details[idx] for idx in chunk_indices]
 
                             with ThreadPoolExecutor(
-                                    max_workers=self.config.max_parallel_details) as thread_executor:
+                                    max_workers=self.config.max_parallel_details
+                            ) as thread_executor:
                                 futures = [thread_executor.submit(
                                                self.retrieve_detailed_log, d[0],
                                                d[1]) for d in chunk_details]
@@ -870,6 +873,7 @@ class MailLogger:
         )
         return total_processed
 
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def retrieve_detailed_log(self, queue_id: str, event_time: int, retries: Optional[int] = None,
                              sleep_time: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -983,6 +987,8 @@ class MailLogger:
                             request_info=detailed_log_url, duration_ms=duration_ms
                         )
                     raise
+        # This point should be unreachable given the raise/return structure above
+        raise RuntimeError(f"Failed to retrieve detailed log from {detailed_log_url}")
 
     def _mask_api_key(self, api_key: str) -> str:
         """
@@ -1055,6 +1061,7 @@ class MailLogger:
 
         return "Request Error"
 
+    # pylint: disable=too-many-locals
     def log_error(
             self, error_message: str, request_info: Optional[str] = None,
             duration_ms: Optional[float] = None) -> None:
@@ -1107,6 +1114,8 @@ class MailLogger:
             print(f"[{timestamp}] {prefix}CRITICAL: Failed to log error to {error_log_path}: {e}")
             print(f"[{timestamp}] {prefix}ORIGINAL ERROR: {error_message}")
 
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks
     def split_and_retrieve_logs(self) -> None:
         """
         Manages log retrieval by splitting time range into manageable intervals.
@@ -1315,7 +1324,221 @@ class MailLogger:
             raise
 
 
-if __name__ == "__main__":
+def discover_sections(cfg: configparser.ConfigParser) -> List[str]:
+    """Find all [MailLogger:*] sections in config."""
+    return [s for s in cfg.sections() if s.startswith('MailLogger:')]
+
+
+def get_section_suffix(section_name: str) -> str:
+    """Extract suffix from section name for file naming."""
+    if ':' in section_name:
+        return section_name.split(':', 1)[1]
+    return 'default'
+
+
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
+def create_config_for_section(
+        cfg: configparser.ConfigParser,
+        section_name: str) -> Tuple[MailLoggerConfig, str]:
+    """Create MailLoggerConfig from a config section."""
+    suffix = get_section_suffix(section_name)
+
+    # Establish script directory for relative path resolution
+    sect_script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Read values with fallbacks from DEFAULT section
+    api_key = cfg.get(section_name, 'api_key')
+
+    # Validate: API key cannot be empty
+    if not api_key or api_key.strip() == '' or api_key == 'YOUR_API_KEY_HERE':
+        raise ValueError(
+            f"Section {section_name}: 'api_key' is required and "
+            f"cannot be empty or placeholder.")
+
+    domain = cfg.get(section_name, 'domain', fallback='')
+    log_type = cfg.get(section_name, 'type', fallback='outgoinglog')
+    api_category = cfg.get(section_name, 'category', fallback='mail')
+
+    # Determine URL based on category
+    default_urls = {
+        'mail': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/mail',
+        'quarantine': 'https://yenipanel-api.uzmanposta.com/api/v2/quarantines',
+        'authentication': 'https://yenipanel.uzmanposta.com/api/v2/logs/authentication'
+    }
+
+    # Priority:
+    # 1. Explicitly set in the SECTION itself (ignore DEFAULT)
+    # 2. Category-specific default
+    # 3. If category is 'mail' (default), then fallback to [DEFAULT] section's 'url' if any
+
+    url = None
+    # Check if URL is locally defined in this section
+    if cfg.has_section(section_name) and cfg.has_option(section_name, 'url'):
+        url = cfg.get(section_name, 'url')
+
+    if not url:
+        # Use category default
+        url = default_urls.get(api_category, default_urls['mail'])
+
+        # Special case for 'mail' category: allow [DEFAULT] url for backward compatibility
+        if api_category == 'mail' and cfg.has_option('DEFAULT', 'url'):
+            url = cfg.get('DEFAULT', 'url')
+
+    # Log resolution detail for diagnostics
+    print(
+        f"--- CONFIG DEBUG --- Section: {section_name} -> "
+        f"Category: {api_category}, URL: {url}")
+
+    if log_type in ['quarantine', 'hold'] and api_category == 'mail':
+        print(
+            f"WARNING: Section {section_name} has type '{log_type}' but "
+            f"category is 'mail'. Did you forget 'category = quarantine'?")
+
+    # Resolve log directory: if relative, make it relative to script_dir
+    raw_log_dir = cfg.get(section_name, 'log_directory', fallback='./output')
+    if not os.path.isabs(raw_log_dir):
+        base_log_dir = os.path.abspath(os.path.join(sect_script_dir, raw_log_dir))
+    else:
+        base_log_dir = raw_log_dir
+
+    # Construct detailed log directory: base/domain/category/type
+    # If domain is empty (auth/quarantine might be global), use 'global'
+    display_domain = domain if domain else 'global'
+
+    # For authentication category, skip the type subdirectory since it's not applicable
+    # For quarantine, skip if type equals category to avoid quarantine/quarantine
+    if api_category == 'authentication':
+        log_directory = os.path.join(base_log_dir, display_domain, api_category)
+    elif api_category == 'quarantine' and log_type == 'quarantine':
+        # Avoid redundant quarantine/quarantine path
+        log_directory = os.path.join(base_log_dir, display_domain, api_category)
+    else:
+        # mail category always uses type, quarantine with 'hold' type uses subdirectory
+        log_directory = os.path.join(base_log_dir, display_domain, api_category, log_type)
+
+    # Generate stable instance id for this section
+    unique_id_string = f"{api_key}{domain}{log_type}{api_category}{url}"
+    section_hash = hashlib.md5(unique_id_string.encode('utf-8')).hexdigest()[:8]
+
+    # Anchor positions and locks to script directory as well
+    positions_dir = os.path.join(sect_script_dir, 'positions')
+    locks_dir = os.path.join(sect_script_dir, 'locks')
+
+    # Position file: use config value or auto-generate
+    position_file_config = cfg.get(section_name, 'position_file', fallback=None)
+    if position_file_config:
+        if "{id}" in position_file_config:
+            res_pos = position_file_config.replace("{id}", section_hash)
+        elif "{section}" in position_file_config:
+            res_pos = position_file_config.replace("{section}", suffix)
+        else:
+            res_pos = position_file_config
+
+        # Ensure absolute path
+        if not os.path.isabs(res_pos):
+            position_file = os.path.abspath(os.path.join(sect_script_dir, res_pos))
+        else:
+            position_file = res_pos
+    else:
+        position_file = os.path.join(positions_dir, f"{suffix}.pos")
+
+    # Lock file: use config value or auto-generate
+    lock_file_config = cfg.get(section_name, 'lock_file_path', fallback=None)
+    if lock_file_config:
+        if "{id}" in lock_file_config:
+            res_lock = lock_file_config.replace("{id}", section_hash)
+        elif "{section}" in lock_file_config:
+            res_lock = lock_file_config.replace("{section}", suffix)
+        else:
+            res_lock = lock_file_config
+
+        # Ensure absolute path
+        if not os.access(res_lock, os.F_OK) and not os.path.isabs(res_lock):
+            lock_file_path = os.path.abspath(os.path.join(sect_script_dir, res_lock))
+        else:
+            lock_file_path = res_lock
+    else:
+        lock_file_path = os.path.join(locks_dir, f"{suffix}.lock")
+
+    # Heartbeat file: use config value or auto-generate
+    heartbeat_file_config = cfg.get(section_name, 'heartbeat_file', fallback=None)
+    if heartbeat_file_config:
+        if "{section}" in heartbeat_file_config:
+            res_hb = heartbeat_file_config.replace("{section}", suffix)
+        else:
+            res_hb = heartbeat_file_config
+
+        heartbeat_file = res_hb
+    else:
+        heartbeat_file = f"{suffix}_heartbeat.json"
+
+    # Create config dataclass
+    mail_config = MailLoggerConfig(
+        api_key=api_key, log_directory=log_directory, log_file_name_format=cfg.get(
+            section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
+        position_file=position_file,
+        start_time=max(
+            0, cfg.getint(
+                section_name, 'start_time', fallback=int(datetime.now().timestamp()) - 60)),
+        domain=domain, url=url, log_type=log_type, api_category=api_category,
+        split_interval=cfg.getint(section_name, 'split_interval', fallback=300),
+        max_time_gap=cfg.getint(section_name, 'max_time_gap', fallback=3600),
+        verbose=cfg.getboolean(section_name, 'verbose', fallback=True),
+        message_log_file_name=cfg.get(
+            section_name, 'message_log_file_name', fallback='messages_%Y-%m-%d_%H.log'),
+        message_log_retention_count=cfg.getint(
+            section_name, 'message_log_retention_count', fallback=2),
+        list_timeout=cfg.getint(section_name, 'list_timeout', fallback=300),
+        detail_timeout=cfg.getint(section_name, 'detail_timeout', fallback=120),
+        list_retries=cfg.getint(section_name, 'list_retries', fallback=10),
+        list_sleep_time=cfg.getint(section_name, 'list_sleep_time', fallback=2),
+        detail_retries=cfg.getint(section_name, 'detail_retries', fallback=10),
+        detail_sleep_time=cfg.getint(section_name, 'detail_sleep_time', fallback=2),
+        max_records_per_page=cfg.getint(
+            section_name, 'max_records_per_page', fallback=1000),
+        heartbeat_file=heartbeat_file, lock_file_path=lock_file_path, section_name=suffix,
+        max_parallel_details=cfg.getint(section_name, 'max_parallel_details', fallback=2),
+        use_session=cfg.getboolean(section_name, 'use_session', fallback=True),
+        error_log_file_name=cfg.get(
+            section_name, 'error_log_file_name', fallback='errors_%Y-%m-%d_%H.log'),
+        error_log_retention_count=cfg.getint(
+            section_name, 'error_log_retention_count', fallback=2),)
+
+    return mail_config, lock_file_path
+
+
+def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
+    """Run a single section. Returns True if successful, False if skipped/failed."""
+    try:
+        mail_config, lock_file_path = create_config_for_section(cfg, section_name)
+
+        # Ensure directories exist (thread-safe)
+        for dir_path in ['./positions', './locks', mail_config.log_directory]:
+            os.makedirs(dir_path, exist_ok=True)
+
+        print(f"[{get_section_suffix(section_name)}] Starting...")
+        print(f"[{get_section_suffix(section_name)}] Lock file: {lock_file_path}")
+
+        mail_logger = MailLogger(mail_config)
+        mail_logger.acquire_lock(lock_file_path)
+        try:
+            mail_logger.run()
+            return True
+        finally:
+            mail_logger.close()
+            mail_logger.release_lock()
+
+    except SystemExit:
+        # Lock already held by another instance
+        print(f"[{get_section_suffix(section_name)}] Skipped (already running)")
+        return False
+    except Exception as e: # pylint: disable=broad-exception-caught
+        print(f"[{get_section_suffix(section_name)}] Error: {e}")
+        return False
+
+
+def main() -> None:
+    """Main entry point for Uzman Posta Mail Event Logger."""
     import argparse
 
     # Parse command line arguments
@@ -1334,231 +1557,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Establish script directory for path resolution
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_directory = os.path.dirname(os.path.abspath(__file__))
 
     # Check if config file exists
     config_file = args.config
     if not os.path.isabs(config_file):
-        config_file = os.path.abspath(os.path.join(script_dir, config_file))
+        config_file = os.path.abspath(os.path.join(script_directory, config_file))
 
     if not os.path.exists(config_file):
         print(f"Configuration file '{config_file}' not found.")
         sys.exit(1)
 
     # Load configuration from file
-    config = configparser.ConfigParser(interpolation=None)
-    config.read(config_file, encoding='utf-8-sig')
-
-    def discover_sections(cfg: configparser.ConfigParser) -> List[str]:
-        """Find all [MailLogger:*] sections in config."""
-        return [s for s in cfg.sections() if s.startswith('MailLogger:')]
-
-    def get_section_suffix(section_name: str) -> str:
-        """Extract suffix from section name for file naming."""
-        if ':' in section_name:
-            return section_name.split(':', 1)[1]
-        return 'default'
-
-    def create_config_for_section(
-            cfg: configparser.ConfigParser,
-            section_name: str) -> Tuple[MailLoggerConfig, str]:
-        """Create MailLoggerConfig from a config section."""
-        suffix = get_section_suffix(section_name)
-
-        # Establish script directory for relative path resolution
-        sect_script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Read values with fallbacks from DEFAULT section
-        api_key = cfg.get(section_name, 'api_key')
-
-        # Validate: API key cannot be empty
-        if not api_key or api_key.strip() == '' or api_key == 'YOUR_API_KEY_HERE':
-            raise ValueError(
-                f"Section {section_name}: 'api_key' is required and "
-                f"cannot be empty or placeholder.")
-
-        domain = cfg.get(section_name, 'domain', fallback='')
-        log_type = cfg.get(section_name, 'type', fallback='outgoinglog')
-        api_category = cfg.get(section_name, 'category', fallback='mail')
-
-        # Determine URL based on category
-        default_urls = {
-            'mail': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/mail',
-            'quarantine': 'https://yenipanel-api.uzmanposta.com/api/v2/quarantines',
-            'authentication': 'https://yenipanel.uzmanposta.com/api/v2/logs/authentication'
-        }
-
-        # Priority:
-        # 1. Explicitly set in the SECTION itself (ignore DEFAULT)
-        # 2. Category-specific default
-        # 3. If category is 'mail' (default), then fallback to [DEFAULT] section's 'url' if any
-
-        url = None
-        # Check if URL is locally defined in this section
-        if cfg.has_section(section_name) and cfg.has_option(section_name, 'url'):
-            url = cfg.get(section_name, 'url')
-
-        if not url:
-            # Use category default
-            url = default_urls.get(api_category, default_urls['mail'])
-
-            # Special case for 'mail' category: allow [DEFAULT] url for backward compatibility
-            if api_category == 'mail' and cfg.has_option('DEFAULT', 'url'):
-                url = cfg.get('DEFAULT', 'url')
-
-        # Log resolution detail for diagnostics
-        print(
-            f"--- CONFIG DEBUG --- Section: {section_name} -> Category: {api_category}, URL: {url}")
-
-        if log_type in ['quarantine', 'hold'] and api_category == 'mail':
-            print(
-                f"WARNING: Section {section_name} has type '{log_type}' but "
-                f"category is 'mail'. Did you forget 'category = quarantine'?")
-
-        # Resolve log directory: if relative, make it relative to script_dir
-        raw_log_dir = cfg.get(section_name, 'log_directory', fallback='./output')
-        if not os.path.isabs(raw_log_dir):
-            base_log_dir = os.path.abspath(os.path.join(sect_script_dir, raw_log_dir))
-        else:
-            base_log_dir = raw_log_dir
-
-        # Construct detailed log directory: base/domain/category/type
-        # If domain is empty (auth/quarantine might be global), use 'global'
-        display_domain = domain if domain else 'global'
-
-        # For authentication category, skip the type subdirectory since it's not applicable
-        # For quarantine, skip if type equals category to avoid quarantine/quarantine
-        if api_category == 'authentication':
-            log_directory = os.path.join(base_log_dir, display_domain, api_category)
-        elif api_category == 'quarantine' and log_type == 'quarantine':
-            # Avoid redundant quarantine/quarantine path
-            log_directory = os.path.join(base_log_dir, display_domain, api_category)
-        else:
-            # mail category always uses type, quarantine with 'hold' type uses subdirectory
-            log_directory = os.path.join(base_log_dir, display_domain, api_category, log_type)
-
-        # Generate stable instance id for this section
-        unique_id_string = f"{api_key}{domain}{log_type}{api_category}{url}"
-        section_hash = hashlib.md5(unique_id_string.encode('utf-8')).hexdigest()[:8]
-
-        # Anchor positions and locks to script directory as well
-        positions_dir = os.path.join(sect_script_dir, 'positions')
-        locks_dir = os.path.join(sect_script_dir, 'locks')
-
-        # Position file: use config value or auto-generate
-        position_file_config = cfg.get(section_name, 'position_file', fallback=None)
-        if position_file_config:
-            if "{id}" in position_file_config:
-                res_pos = position_file_config.replace("{id}", section_hash)
-            elif "{section}" in position_file_config:
-                res_pos = position_file_config.replace("{section}", suffix)
-            else:
-                res_pos = position_file_config
-
-            # Ensure absolute path
-            if not os.path.isabs(res_pos):
-                position_file = os.path.abspath(os.path.join(sect_script_dir, res_pos))
-            else:
-                position_file = res_pos
-        else:
-            position_file = os.path.join(positions_dir, f"{suffix}.pos")
-
-        # Lock file: use config value or auto-generate
-        lock_file_config = cfg.get(section_name, 'lock_file_path', fallback=None)
-        if lock_file_config:
-            if "{id}" in lock_file_config:
-                res_lock = lock_file_config.replace("{id}", section_hash)
-            elif "{section}" in lock_file_config:
-                res_lock = lock_file_config.replace("{section}", suffix)
-            else:
-                res_lock = lock_file_config
-
-            # Ensure absolute path
-            if not os.access(res_lock, os.F_OK) and not os.path.isabs(res_lock):
-                lock_file_path = os.path.abspath(os.path.join(sect_script_dir, res_lock))
-            else:
-                lock_file_path = res_lock
-        else:
-            lock_file_path = os.path.join(locks_dir, f"{suffix}.lock")
-
-        # Heartbeat file: use config value or auto-generate
-        heartbeat_file_config = cfg.get(section_name, 'heartbeat_file', fallback=None)
-        if heartbeat_file_config:
-            if "{section}" in heartbeat_file_config:
-                res_hb = heartbeat_file_config.replace("{section}", suffix)
-            else:
-                res_hb = heartbeat_file_config
-
-            heartbeat_file = res_hb
-        else:
-            heartbeat_file = f"{suffix}_heartbeat.json"
-
-        # Create config dataclass
-        mail_config = MailLoggerConfig(
-            api_key=api_key, log_directory=log_directory, log_file_name_format=cfg.get(
-                section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
-            position_file=position_file,
-            start_time=max(
-                0, cfg.getint(
-                    section_name, 'start_time', fallback=int(datetime.now().timestamp()) -60)),
-            domain=domain, url=url, log_type=log_type, api_category=api_category,
-            split_interval=cfg.getint(section_name, 'split_interval', fallback=300),
-            max_time_gap=cfg.getint(section_name, 'max_time_gap', fallback=3600),
-            verbose=cfg.getboolean(section_name, 'verbose', fallback=True),
-            message_log_file_name=cfg.get(
-                section_name, 'message_log_file_name', fallback='messages_%Y-%m-%d_%H.log'),
-            message_log_retention_count=cfg.getint(
-                section_name, 'message_log_retention_count', fallback=2),
-            list_timeout=cfg.getint(section_name, 'list_timeout', fallback=300),
-            detail_timeout=cfg.getint(section_name, 'detail_timeout', fallback=120),
-            list_retries=cfg.getint(section_name, 'list_retries', fallback=10),
-            list_sleep_time=cfg.getint(section_name, 'list_sleep_time', fallback=2),
-            detail_retries=cfg.getint(section_name, 'detail_retries', fallback=10),
-            detail_sleep_time=cfg.getint(section_name, 'detail_sleep_time', fallback=2),
-            max_records_per_page=cfg.getint(
-                section_name, 'max_records_per_page', fallback=1000),
-            heartbeat_file=heartbeat_file, lock_file_path=lock_file_path, section_name=suffix,
-            max_parallel_details=cfg.getint(section_name, 'max_parallel_details', fallback=2),
-            use_session=cfg.getboolean(section_name, 'use_session', fallback=True),
-            error_log_file_name=cfg.get(
-                section_name, 'error_log_file_name', fallback='errors_%Y-%m-%d_%H.log'),
-            error_log_retention_count=cfg.getint(
-                section_name, 'error_log_retention_count', fallback=2),)
-
-        return mail_config, lock_file_path
-
-    def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
-        """Run a single section. Returns True if successful, False if skipped/failed."""
-        try:
-            mail_config, lock_file_path = create_config_for_section(cfg, section_name)
-
-            # Ensure directories exist (thread-safe)
-            for dir_path in ['./positions', './locks', mail_config.log_directory]:
-                os.makedirs(dir_path, exist_ok=True)
-
-            print(f"[{get_section_suffix(section_name)}] Starting...")
-            print(f"[{get_section_suffix(section_name)}] Lock file: {lock_file_path}")
-
-            mail_logger = MailLogger(mail_config)
-            mail_logger.acquire_lock(lock_file_path)
-            try:
-                mail_logger.run()
-                return True
-            finally:
-                mail_logger.close()
-                mail_logger.release_lock()
-
-        except SystemExit:
-            # Lock already held by another instance
-            print(f"[{get_section_suffix(section_name)}] Skipped (already running)")
-            return False
-        except Exception as e: # pylint: disable=broad-exception-caught
-            print(f"[{get_section_suffix(section_name)}] Error: {e}")
-            return False
+    cfg_parser = configparser.ConfigParser(interpolation=None)
+    cfg_parser.read(config_file, encoding='utf-8-sig')
 
     # Discover available sections
-    multi_sections = discover_sections(config)
-    has_legacy_section = config.has_section('MailLogger')
+    multi_sections = discover_sections(cfg_parser)
+    has_legacy_section = cfg_parser.has_section('MailLogger')
 
     # --list: Show available sections and exit
     if args.list:
@@ -1574,7 +1590,7 @@ if __name__ == "__main__":
 
     if args.section:
         # Run specific section
-        if args.section in config.sections():
+        if args.section in cfg_parser.sections():
             sections_to_run = [args.section]
         else:
             print(f"Section '{args.section}' not found in config.")
@@ -1624,7 +1640,7 @@ if __name__ == "__main__":
             )
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 future_to_section = {
-                    executor.submit(run_section, config, section): section
+                    executor.submit(run_section, cfg_parser, section): section
                     for section in sections_to_run
                 }
                 try:
@@ -1649,7 +1665,7 @@ if __name__ == "__main__":
             for section in sections_to_run:
                 if MailLogger._shutdown_event.is_set():  # pylint: disable=protected-access
                     break
-                is_success = run_section(config, section)
+                is_success = run_section(cfg_parser, section)
                 if is_success:
                     results['success'] += 1
                 else:
@@ -1665,3 +1681,7 @@ if __name__ == "__main__":
         print(f"  Skipped:   {results['skipped']}")
         if results['failed'] > 0:
             print(f"  Failed:    {results['failed']}")
+
+
+if __name__ == "__main__":
+    main()
