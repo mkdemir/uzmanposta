@@ -7,12 +7,17 @@
 
 [DEFAULT]
 # --- API & Core Settings ---
-# url can be set here to override all sections, 
-# but it is recommended to let the script handle it via 'category' 
-# or set it explicitly in each section.
+# url can be set here to override all sections.
+# If not specified, the script automatically uses category-specific endpoints:
+#   - mail: https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+#   - quarantine: https://yenipanel-api.uzmanposta.com/api/v2/quarantines
+#   - authentication: https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication
 # log_directory               = ./output
 # max_records_per_page        = 1000
 # log_file_name_format        = {domain}_{type}_%Y-%m-%d_%H.log
+# start_time: Unix timestamp to start log retrieval from. 
+#             If not specified, defaults to the current time.
+# start_time                  = 1704067200
 # type: Log type to retrieve. If not specified, defaults to 'outgoinglog'.
 #       Valid values for 'mail' category: incominglog, outgoinglog
 #       Valid values for 'quarantine' category: quarantine, hold
@@ -60,7 +65,8 @@ url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
 domain               = example.com
 category             = mail
 type                 = incominglog
-start_time           = 1703240000
+# url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+# start_time           = 1704067200
 # log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
 
 # --- Section 2: Outgoing Logs ---
@@ -70,7 +76,8 @@ url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
 domain               = example.com
 category             = mail
 type                 = outgoinglog
-start_time           = 1703240000
+# url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/mail
+# start_time           = 1704067200
 # log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
 
 # =============================================================================
@@ -89,7 +96,8 @@ domain               = example.com
 category             = quarantine
 # type can be: quarantine, hold
 type                 = quarantine
-start_time           = 1703240000
+# url                  = https://yenipanel-api.uzmanposta.com/api/v2/quarantines
+# start_time           = 1704067200
 # log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
 
 # --- Section 4: Authentication Logs ---
@@ -100,7 +108,8 @@ api_key              = YOUR_API_KEY_HERE
 url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication
 domain               = example.com
 category             = authentication
-start_time           = 1703240000
+# url                  = https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication
+# start_time           = 1704067200
 # log_file_name_format = {domain}_{type}_%Y-%m-%d_%H.log
 
 # =============================================================================
