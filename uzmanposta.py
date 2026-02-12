@@ -563,7 +563,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         except IOError as e:
             self.log_error(f"Failed to update heartbeat: {e}")
 
-    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    # pylint: disable=too-many-arguments,too-many-locals
     # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks
     def retrieve_logs(self, starttime: int, endtime: int, retries: Optional[int] = None,
                       sleep_time: Optional[int] = None, chunk_size: int = 500) -> int:
@@ -1116,7 +1116,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             print(f"[{timestamp}] {prefix}CRITICAL: Failed to log error to {error_log_path}: {e}")
             print(f"[{timestamp}] {prefix}ORIGINAL ERROR: {error_message}")
 
-    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    # pylint: disable=too-many-arguments,too-many-locals
     # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks
     def split_and_retrieve_logs(self) -> None:
         """
