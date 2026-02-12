@@ -751,26 +751,55 @@ class MailLogger:
                     attempt += 1
                     self.metrics.errors_count += 1
                     detailed_error = self._parse_api_error(http_error.response)
-                    # Include the URL that caused the error
                     url_with_params = http_error.response.url if http_error.response is not None else self.config.url
-                    self.log_error(f"API HTTP Error for URL {url_with_params} (attempt {attempt}): {detailed_error}", request_info=url_with_params)
+                    duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                    
+                    # HTTP 429 Rate Limit handling
+                    if http_error.response is not None and http_error.response.status_code == 429:
+                        retry_after = http_error.response.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait_seconds = int(retry_after)
+                            except ValueError:
+                                wait_seconds = 60
+                            self.log_error(
+                                f"Rate Limited (HTTP 429) for {url_with_params}. Retry-After: {retry_after}s (attempt {attempt})",
+                                request_info=url_with_params, duration_ms=duration_ms
+                            )
+                            if attempt < retries:
+                                MailLogger._shutdown_event.wait(wait_seconds)
+                            continue
+                        else:
+                            self.log_error(
+                                f"Rate Limited (HTTP 429) for {url_with_params}. No Retry-After header (attempt {attempt})",
+                                request_info=url_with_params, duration_ms=duration_ms
+                            )
+                            if attempt < retries:
+                                delay = min(sleep_time * (2 ** (attempt - 1)), 60)
+                                MailLogger._shutdown_event.wait(delay)
+                            continue
+                    
+                    self.log_error(
+                        f"API HTTP Error for URL {url_with_params} (attempt {attempt}): {detailed_error}",
+                        request_info=url_with_params, duration_ms=duration_ms
+                    )
                     if attempt < retries:
                         delay = min(sleep_time * (2 ** (attempt - 1)), 60)
                         MailLogger._shutdown_event.wait(delay)
                 except requests.exceptions.RequestException as req_error:
                     attempt += 1
                     self.metrics.errors_count += 1
-                    # Try to get URL from request if available
                     failed_url = getattr(req_error.request, 'url', self.config.url) if hasattr(req_error, 'request') else self.config.url
+                    duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
                     
-                    # Detect DNS failure
-                    if isinstance(req_error, requests.exceptions.ConnectionError) and not self._check_dns(failed_url):
-                        self.log_error(f"DNS Resolution Failed for {failed_url}. Please check your internet connection or DNS settings.", request_info=failed_url)
-                    else:
-                        self.log_error(f"Error retrieving logs from {failed_url} (attempt {attempt}): {req_error}", request_info=failed_url)
+                    # Classify the connection error
+                    error_label = self._classify_connection_error(req_error, failed_url)
+                    self.log_error(
+                        f"{error_label} for {failed_url} (attempt {attempt}): {req_error}",
+                        request_info=failed_url, duration_ms=duration_ms
+                    )
                     
                     if attempt < retries:
-                        # Exponential backoff with cap
                         delay = min(sleep_time * (2 ** (attempt - 1)), 60)
                         MailLogger._shutdown_event.wait(delay)
                 except ValueError:
@@ -855,24 +884,68 @@ class MailLogger:
             except requests.exceptions.HTTPError as http_error:
                 attempt += 1
                 detailed_error = self._parse_api_error(http_error.response)
-                # Include the URL that caused the error
                 url_with_params = http_error.response.url if http_error.response is not None else detailed_log_url
+                duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                
+                # HTTP 429 Rate Limit handling
+                if http_error.response is not None and http_error.response.status_code == 429:
+                    retry_after = http_error.response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            wait_seconds = int(retry_after)
+                        except ValueError:
+                            wait_seconds = 60
+                        self.log_error(
+                            f"Rate Limited (HTTP 429) for {url_with_params}. Retry-After: {retry_after}s (attempt {attempt})",
+                            request_info=url_with_params, duration_ms=duration_ms
+                        )
+                        if attempt < retries:
+                            MailLogger._shutdown_event.wait(wait_seconds)
+                        else:
+                            raise
+                        continue
+                
                 if attempt < retries:
                     MailLogger._shutdown_event.wait(sleep_time)
                 else:
-                    self.log_error(f"API HTTP Error for URL {url_with_params} after {retries} attempts: {detailed_error}", request_info=url_with_params)
+                    self.log_error(
+                        f"API HTTP Error for URL {url_with_params} after {retries} attempts: {detailed_error}",
+                        request_info=url_with_params, duration_ms=duration_ms
+                    )
                     raise
             except Exception as detail_error:
                 attempt += 1
+                duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
                 if attempt < retries:
-                    MailLogger._shutdown_event.wait(sleep_time)  # Sleep before retrying
+                    MailLogger._shutdown_event.wait(sleep_time)
                 else:
-                    # Detect DNS failure
-                    if isinstance(detail_error, requests.exceptions.ConnectionError) and not self._check_dns(detailed_log_url):
-                        self.log_error(f"DNS Resolution Failed for {detailed_log_url}. Please check your internet connection or DNS settings.", request_info=detailed_log_url)
+                    # Classify connection errors
+                    if isinstance(detail_error, requests.exceptions.RequestException):
+                        error_label = self._classify_connection_error(detail_error, detailed_log_url)
+                        self.log_error(
+                            f"{error_label} for {detailed_log_url} after {retries} attempts: {detail_error}",
+                            request_info=detailed_log_url, duration_ms=duration_ms
+                        )
                     else:
-                        self.log_error(f"Failed to retrieve detailed log from {detailed_log_url} after {retries} attempts: {detail_error}", request_info=detailed_log_url)
+                        self.log_error(
+                            f"Failed to retrieve detailed log from {detailed_log_url} after {retries} attempts: {detail_error}",
+                            request_info=detailed_log_url, duration_ms=duration_ms
+                        )
                     raise
+
+    def _mask_api_key(self, api_key: str) -> str:
+        """
+        Masks the API key for safe logging, showing only first and last 4 characters.
+        
+        Args:
+            api_key: The full API key
+            
+        Returns:
+            Masked API key string (e.g., 'abcd...1234')
+        """
+        if not api_key or len(api_key) <= 8:
+            return '***'
+        return f"{api_key[:4]}...{api_key[-4:]}"
 
     def _check_dns(self, url: str) -> bool:
         """
@@ -892,26 +965,61 @@ class MailLogger:
         except socket.gaierror:
             return False
         except Exception:
-            return True # If something else fails, assume True to fallback to original error
+            return True
         return True
 
-    def log_error(self, error_message: str, request_info: Optional[str] = None) -> None:
+    def _classify_connection_error(self, error: Exception, url: str) -> str:
+        """
+        Classifies a connection error into a human-readable category.
+        
+        Args:
+            error: The exception to classify
+            url: The URL that caused the error
+            
+        Returns:
+            A descriptive error label string
+        """
+        error_str = str(error).lower()
+        
+        # Check for timeout
+        if isinstance(error, requests.exceptions.Timeout) or 'timeout' in error_str or 'timed out' in error_str:
+            return "Connection Timeout"
+        
+        # Check for connection refused
+        if isinstance(error, requests.exceptions.ConnectionError):
+            if 'connection refused' in error_str or '[errno 111]' in error_str or '[winerror 10061]' in error_str:
+                return "Connection Refused"
+            # Check for DNS failure
+            if not self._check_dns(url):
+                return "DNS Resolution Failed. Please check your internet connection or DNS settings"
+            return "Connection Error"
+        
+        # Check for SSL errors
+        if 'ssl' in error_str or 'certificate' in error_str:
+            return "SSL/TLS Error"
+        
+        return "Request Error"
+
+    def log_error(self, error_message: str, request_info: Optional[str] = None, duration_ms: Optional[float] = None) -> None:
         """
         Logs error messages to file with timestamp.
 
         Args:
             error_message: Error message to log
             request_info: Optional request URL or information
+            duration_ms: Optional request duration in milliseconds
         """
         error_data = {
             "time": int(datetime.now().timestamp()),
             "error": str(error_message),
-            "api_key": self.config.api_key,
+            "api_key": self._mask_api_key(self.config.api_key),
             "domain": self.config.domain,
             "type": self.config.log_type
         }
         if request_info:
             error_data["request"] = request_info
+        if duration_ms is not None:
+            error_data["duration_ms"] = duration_ms
         error_json = json.dumps(error_data, ensure_ascii=False)
         
         # Use timestamped filename if pattern has date tokens
