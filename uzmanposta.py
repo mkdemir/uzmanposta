@@ -869,7 +869,14 @@ class MailLogger:
         Args:
             error_message: Error message to log
         """
-        error_json = json.dumps({"time": int(datetime.now().timestamp()), "error": str(error_message)}, ensure_ascii=False)
+        error_data = {
+            "time": int(datetime.now().timestamp()),
+            "error": str(error_message),
+            "api_key": self.config.api_key,
+            "domain": self.config.domain,
+            "type": self.config.log_type
+        }
+        error_json = json.dumps(error_data, ensure_ascii=False)
         
         # Use timestamped filename if pattern has date tokens
         pattern = self.config.error_log_file_name
