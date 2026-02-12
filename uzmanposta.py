@@ -147,14 +147,14 @@ class MailLogger:
     # Global shutdown event shared across all instances
     _shutdown_event = threading.Event()
 
-    def __init__(self, config: MailLoggerConfig) -> None:
+    def __init__(self, cfg: MailLoggerConfig) -> None:
         """
         Initialize mail logger with configuration.
 
         Args:
             config: MailLoggerConfig instance with all required settings
         """
-        self.config = config
+        self.config = cfg
         self.metrics = Metrics()
 
         # Ensure directories exist
@@ -183,7 +183,7 @@ class MailLogger:
             try:
                 self.session.close()
                 self.log_message("Session closed")
-            except:
+            except Exception: # pylint: disable=broad-exception-caught
                 pass
 
     def _setup_signal_handlers(self) -> None:
@@ -192,7 +192,7 @@ class MailLogger:
             signal.signal(signal.SIGTERM, self._handle_shutdown)
             signal.signal(signal.SIGINT, self._handle_shutdown)
 
-    def _handle_shutdown(self, signum: int, frame: Any) -> None:
+    def _handle_shutdown(self, signum: int, _frame: Any) -> None:
         """
         Handle shutdown signals gracefully.
 
@@ -235,9 +235,9 @@ class MailLogger:
                 # Fields to extract from the error body
                 fields = ['status', 'code', 'message', 'api-version', 'extended-code-text', 'link']
                 details = []
-                for field in fields:
-                    if field in error_json:
-                        details.append(f"{field}: {error_json[field]}")
+                for fld in fields:
+                    if fld in error_json:
+                        details.append(f"{fld}: {error_json[fld]}")
 
                 if details:
                     error_details.append(" | ".join(details))
@@ -260,7 +260,7 @@ class MailLogger:
         """
         prefix = f"[{self.config.section_name}] " if self.config.section_name else ""
         if self.config.verbose:
-            self.message_logger.info(f"{prefix}{message}")
+            self.message_logger.info("%s%s", prefix, message)
         else:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{timestamp}] {prefix}{message}")
@@ -282,7 +282,7 @@ class MailLogger:
                 else:
                     os.rename(src, dst)
                 return
-            except (PermissionError, OSError) as e:
+            except (PermissionError, OSError) as _e:
                 if i == max_retries - 1:
                     raise
                 time.sleep(delay)
@@ -396,9 +396,9 @@ class MailLogger:
             try:
                 os.remove(os.path.join(message_dir, fname))
                 if hasattr(self, "message_logger"):
-                    self.message_logger.info(f"Removed old message log: {fname}")
-            except Exception as e:
-                self.log_error(f"Failed to delete old message log {fname}: {e}")
+                    self.message_logger.info("Removed old message log: %s", fname)
+            except Exception as _e:
+                self.log_error(f"Failed to delete old message log {fname}: {_e}")
 
     def cleanup_old_error_logs(self, retention_count: int = 2) -> None:
         """
@@ -413,7 +413,7 @@ class MailLogger:
             return
 
         # Build directory and filename pattern
-        resolved_path = datetime.now().strftime(pattern)
+        _unused_path = datetime.now().strftime(pattern)
         # Handle relative/absolute paths
         if os.path.isabs(pattern):
             error_dir = os.path.dirname(pattern)
@@ -443,8 +443,8 @@ class MailLogger:
             try:
                 os.remove(os.path.join(error_dir, fname))
                 if hasattr(self, "message_logger"):
-                    self.message_logger.info(f"Removed old error log: {fname}")
-            except Exception:
+                    self.message_logger.info("Removed old error log: %s", fname)
+            except (OSError, IOError):
                 pass
 
     def generate_log_file_name(self) -> str:
@@ -517,7 +517,7 @@ class MailLogger:
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
-                except:
+                except Exception:
                     pass
 
     def load_last_position(self) -> Optional[int]:
@@ -620,7 +620,7 @@ class MailLogger:
                 f"Retrieving logs for category '{self.config.api_category}' with params: {params}")
 
             attempt = 0
-            success = False
+            is_successful = False
             while attempt < retries:
                 if self._shutdown_requested:
                     break
@@ -701,22 +701,22 @@ class MailLogger:
                             chunk_details = [job_details[idx] for idx in chunk_indices]
 
                             with ThreadPoolExecutor(
-                                    max_workers=self.config.max_parallel_details) as executor:
-                                futures = [executor.submit(
+                                    max_workers=self.config.max_parallel_details) as thread_executor:
+                                futures = [thread_executor.submit(
                                                self.retrieve_detailed_log, d[0],
                                                d[1]) for d in chunk_details]
 
-                                results = []
-                                for future in futures:
+                                batch_results = []
+                                for batch_future in futures:
                                     try:
-                                        results.append(future.result())
+                                        batch_results.append(batch_future.result())
                                     except Exception as e:
                                         self.log_error(f"Failed to retrieve detailed log: {e}")
                                         self.metrics.errors_count += 1
                                         raise
 
                                 # Update job_details with actual log data
-                                for idx_in_chunk, result_log in enumerate(results):
+                                for idx_in_chunk, result_log in enumerate(batch_results):
                                     actual_idx = chunk_indices[idx_in_chunk]
                                     job_details[actual_idx] = result_log
 
@@ -768,7 +768,7 @@ class MailLogger:
                                 buffer.clear()
 
                     # Finished this page successfully
-                    success = True
+                    is_successful = True
                     break
 
                 except requests.exceptions.HTTPError as http_error:
@@ -797,16 +797,16 @@ class MailLogger:
                             if attempt < retries:
                                 MailLogger._shutdown_event.wait(wait_seconds)
                             continue
-                        else:
-                            self.log_error(
-                                f"Rate Limited (HTTP 429) for {url_with_params}. "
-                                f"No Retry-After header (attempt {attempt})",
-                                request_info=url_with_params, duration_ms=duration_ms
-                            )
-                            if attempt < retries:
-                                delay = min(sleep_time * (2 ** (attempt - 1)), 60)
-                                MailLogger._shutdown_event.wait(delay)
-                            continue
+
+                        self.log_error(
+                            f"Rate Limited (HTTP 429) for {url_with_params}. "
+                            f"No Retry-After header (attempt {attempt})",
+                            request_info=url_with_params, duration_ms=duration_ms
+                        )
+                        if attempt < retries:
+                            delay = min(sleep_time * (2 ** (attempt - 1)), 60)
+                            MailLogger._shutdown_event.wait(delay)
+                        continue
 
                     self.log_error(
                         f"API HTTP Error for URL {url_with_params} (attempt {attempt}): "
@@ -836,13 +836,15 @@ class MailLogger:
                         MailLogger._shutdown_event.wait(delay)
                 except ValueError:
                     raise
-                except Exception as unexpected_error:
+                except Exception as unexpected_error: # pylint: disable=broad-exception-caught
                     self.log_error(
                         f"Unexpected error: {unexpected_error}", request_info=self.config.url)
+                    self.save_last_position(last_processed_time)
+                    buffer.clear()
                     self.metrics.errors_count += 1
                     raise
 
-            if success:
+            if is_successful:
                 # Finished a page or interval portion successfully
                 if buffer:
                     self.process_logs(buffer)
@@ -852,7 +854,7 @@ class MailLogger:
                 self.save_last_position(last_processed_time)
             elif not self._shutdown_requested and count_all < self.config.max_records_per_page:
                 # If we didn't succeed and it wasn't a split, raise
-                raise Exception(
+                raise RuntimeError(
                     f"Failed to retrieve logs for range [{s}, {e}] after {retries} attempts.")
 
         # Döngü bittikten sonra kalan buffer'ı da yaz
@@ -916,9 +918,9 @@ class MailLogger:
                 fields_to_remove = ['logs', 'transactions', 'filters', 'emails']
 
                 # Remove specified fields from the detailed log
-                for field in fields_to_remove:
-                    if field in detailed_log:
-                        del detailed_log[field]
+                for fld in fields_to_remove:
+                    if fld in detailed_log:
+                        del detailed_log[fld]
                 return detailed_log
 
             except requests.exceptions.HTTPError as http_error:
@@ -958,7 +960,7 @@ class MailLogger:
                         request_info=url_with_params, duration_ms=duration_ms
                     )
                     raise
-            except Exception as detail_error:
+            except Exception as detail_error: # pylint: disable=broad-exception-caught
                 attempt += 1
                 duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
                 if attempt < retries:
@@ -966,6 +968,7 @@ class MailLogger:
                 else:
                     # Classify connection errors
                     if isinstance(detail_error, requests.exceptions.RequestException):
+                        # Classify the connection error
                         error_label = self._classify_connection_error(
                             detail_error, detailed_log_url)
                         self.log_error(
@@ -1012,7 +1015,7 @@ class MailLogger:
                 return True
         except socket.gaierror:
             return False
-        except Exception:
+        except Exception: # pylint: disable=broad-exception-caught
             return True
         return True
 
@@ -1053,8 +1056,8 @@ class MailLogger:
         return "Request Error"
 
     def log_error(
-            self, error_message: str, request_info: Optional[str]=None,
-            duration_ms: Optional[float]=None) ->None:
+            self, error_message: str, request_info: Optional[str] = None,
+            duration_ms: Optional[float] = None) -> None:
         """
         Logs error messages to file with timestamp.
 
@@ -1097,7 +1100,7 @@ class MailLogger:
 
             with open(error_log_path, 'a', encoding='utf-8') as log_file:
                 log_file.write(error_json + "\n")
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             # Fallback to console if file logging fails
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             prefix = f"[{self.config.section_name}] " if self.config.section_name else ""
@@ -1202,7 +1205,9 @@ class MailLogger:
             IOError: If another instance is already running
         """
         self.lock_file_path = lock_file_path
-        self.lock_file = open(self.lock_file_path, 'w', encoding='utf-8')
+        # Use open() directly because the lock must remain held for the process lifetime
+        self.lock_file = open(  # pylint: disable=consider-using-with
+            self.lock_file_path, 'w', encoding='utf-8')
         try:
             if os.name == 'nt':
                 msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -1304,7 +1309,7 @@ class MailLogger:
             self.split_and_retrieve_logs()
             self.log_metrics_summary()
             self.update_heartbeat("completed")
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             self.log_error(f"Error during execution: {e}")
             self.update_heartbeat("error")
             raise
@@ -1361,7 +1366,7 @@ if __name__ == "__main__":
         suffix = get_section_suffix(section_name)
 
         # Establish script directory for relative path resolution
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sect_script_dir = os.path.dirname(os.path.abspath(__file__))
 
         # Read values with fallbacks from DEFAULT section
         api_key = cfg.get(section_name, 'api_key')
@@ -1390,8 +1395,8 @@ if __name__ == "__main__":
 
         url = None
         # Check if URL is locally defined in this section
-        if section_name in cfg._sections and 'url' in cfg._sections[section_name]:
-            url = cfg._sections[section_name]['url']
+        if cfg.has_section(section_name) and cfg.has_option(section_name, 'url'):
+            url = cfg.get(section_name, 'url')
 
         if not url:
             # Use category default
@@ -1413,7 +1418,7 @@ if __name__ == "__main__":
         # Resolve log directory: if relative, make it relative to script_dir
         raw_log_dir = cfg.get(section_name, 'log_directory', fallback='./output')
         if not os.path.isabs(raw_log_dir):
-            base_log_dir = os.path.abspath(os.path.join(script_dir, raw_log_dir))
+            base_log_dir = os.path.abspath(os.path.join(sect_script_dir, raw_log_dir))
         else:
             base_log_dir = raw_log_dir
 
@@ -1437,8 +1442,8 @@ if __name__ == "__main__":
         section_hash = hashlib.md5(unique_id_string.encode('utf-8')).hexdigest()[:8]
 
         # Anchor positions and locks to script directory as well
-        positions_dir = os.path.join(script_dir, 'positions')
-        locks_dir = os.path.join(script_dir, 'locks')
+        positions_dir = os.path.join(sect_script_dir, 'positions')
+        locks_dir = os.path.join(sect_script_dir, 'locks')
 
         # Position file: use config value or auto-generate
         position_file_config = cfg.get(section_name, 'position_file', fallback=None)
@@ -1452,7 +1457,7 @@ if __name__ == "__main__":
 
             # Ensure absolute path
             if not os.path.isabs(res_pos):
-                position_file = os.path.abspath(os.path.join(script_dir, res_pos))
+                position_file = os.path.abspath(os.path.join(sect_script_dir, res_pos))
             else:
                 position_file = res_pos
         else:
@@ -1470,7 +1475,7 @@ if __name__ == "__main__":
 
             # Ensure absolute path
             if not os.access(res_lock, os.F_OK) and not os.path.isabs(res_lock):
-                lock_file_path = os.path.abspath(os.path.join(script_dir, res_lock))
+                lock_file_path = os.path.abspath(os.path.join(sect_script_dir, res_lock))
             else:
                 lock_file_path = res_lock
         else:
@@ -1547,7 +1552,7 @@ if __name__ == "__main__":
             # Lock already held by another instance
             print(f"[{get_section_suffix(section_name)}] Skipped (already running)")
             return False
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             print(f"[{get_section_suffix(section_name)}] Error: {e}")
             return False
 
@@ -1573,10 +1578,10 @@ if __name__ == "__main__":
             sections_to_run = [args.section]
         else:
             print(f"Section '{args.section}' not found in config.")
-            available_str = (
+            available_sections = (
                 ', '.join(multi_sections) if multi_sections else 'MailLogger (legacy)'
             )
-            print("Available: " + available_str)
+            print("Available: " + available_sections)
             sys.exit(1)
     elif args.all:
         # Run all MailLogger:* sections
@@ -1626,36 +1631,36 @@ if __name__ == "__main__":
                     for future in as_completed(future_to_section):
                         section = future_to_section[future]
                         try:
-                            success = future.result()
-                            if success:
+                            is_success = future.result()
+                            if is_success:
                                 results['success'] += 1
                             else:
                                 results['skipped'] += 1
-                        except Exception as e:
+                        except Exception as e: # pylint: disable=broad-exception-caught
                             print(f"[{get_section_suffix(section)}] Thread error: {e}")
                             results['failed'] += 1
                 except KeyboardInterrupt:
                     print("\nMain thread received Ctrl+C, notifying workers...")
-                    MailLogger._shutdown_event.set()
+                    MailLogger._shutdown_event.set()  # pylint: disable=protected-access
                     # Wait for threads to finish
                     executor.shutdown(wait=True)
         else:
             # Sequential execution
             for section in sections_to_run:
-                if MailLogger._shutdown_event.is_set():
+                if MailLogger._shutdown_event.is_set():  # pylint: disable=protected-access
                     break
-                success = run_section(config, section)
-                if success:
+                is_success = run_section(config, section)
+                if is_success:
                     results['success'] += 1
                 else:
                     results['skipped'] += 1
     except KeyboardInterrupt:
         print("\nShutdown requested via Ctrl+C")
-        MailLogger._shutdown_event.set()
+        MailLogger._shutdown_event.set()  # pylint: disable=protected-access
 
     # Print summary if multiple sections
     if len(sections_to_run) > 1:
-        print(f"\n=== Summary ===")
+        print("\n=== Summary ===")
         print(f"  Completed: {results['success']}/{len(sections_to_run)}")
         print(f"  Skipped:   {results['skipped']}")
         if results['failed'] > 0:
