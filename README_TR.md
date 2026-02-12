@@ -20,6 +20,9 @@
 - ✅ **Atomik Pozisyon Takibi**: Çökme veya manuel durdurma durumunda bile işleme kaldığı yerden eksiksiz devam eder.
 - ✅ **Oturum Yönetimi**: `requests.Session` ile kalıcı HTTP bağlantıları (Keep-Alive) kullanır.
 - ✅ **İzleme**: Alan adı bazında gerçek zamanlı kalp atış (heartbeat) dosyaları ve kapsamlı metrikler sunar.
+- ✅ **Güvenlik Odaklı**: API anahtarları, kazara sızıntıları önlemek için log dosyalarında otomatik olarak maskelenir.
+- ✅ **Gelişmiş Teşhis**: Loglar; istek süresini (`duration_ms`), detaylı hata sınıflandırmasını ve otomatik DNS hata tespitini içerir.
+- ✅ **Akıllı Hız Sınırlandırma**: `Retry-After` başlıklarına uyarak ve üstel geri çekilme (exponential backoff) kullanarak HTTP 429 hatalarını otomatik yönetir.
 
 ## Gereksinimler
 
@@ -49,7 +52,7 @@ python3 uzmanposta.py --section "MailLogger:domain-outgoing"
 ## Komut Satırı Argümanları (CLI)
 
 | Argüman | Açıklama | Varsayılan |
-|----------|-------------|---------|
+| --- | --- | --- |
 | `--config YOL` | INI yapılandırma dosyasının yolu. | `uzmanposta.ini` |
 | `--section İSİM` | Sadece yapılandırmadaki belirli bir bölümü çalıştırır. | - |
 | `--all` | `[MailLogger:*]` ile başlayan tüm bölümleri işler. | `False` |
@@ -155,7 +158,9 @@ Veri bozulmasını önlemek için çapraz platform destekli bir dosya kilitleme 
 Bu, Windows üzerinde birden fazla iş parçacığı aynı anda dosya yazmaya/yeniden adlandırmaya çalışırken, antivirüs tarayıcısı veya işletim sisteminin dosyaları anlık olarak kilitlemesi sonucu oluşan yaygın bir sorundur. Betik, bu geçici hatayı otomatik olarak işlemek için bir yeniden deneme mekanizması (`_safe_replace`) içerir.
 
 ### API Kısıtlaması ("Too Many Requests")
-HTTP 429 hataları veya zaman aşımı görüyorsanız, eşzamanlılığı azaltın:
+
+Betik, HTTP 429 hatalarını `Retry-After` başlığına göre bekleyerek otomatik olarak yönetir. Ancak kısıtlama devam ederse:
+
 - `--max-workers` değerini düşürün (örneğin 5'ten 2'ye).
 - `uzmanposta.ini` içindeki `max_parallel_details` değerini düşürün (örneğin 1 veya 2 yapın).
 

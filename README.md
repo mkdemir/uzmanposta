@@ -20,6 +20,9 @@ The **Uzman Posta Mail Event Logger** is a production-grade Python script design
 - ✅ **Atomic Position Tracking**: Resumes exactly where it left off, even after a crash or manual stop.
 - ✅ **Session Management**: Uses persistent HTTP connections (Keep-Alive) with `requests.Session`.
 - ✅ **Monitoring**: Real-time heartbeat files and comprehensive metrics per domain.
+- ✅ **Security First**: API keys are automatically masked in log files to prevent accidental leakage.
+- ✅ **Advanced Diagnostics**: Logs include request duration (`duration_ms`), detailed error classification, and automatic DNS failure detection.
+- ✅ **Smart Rate Limiting**: Automatically handles HTTP 429 errors by respecting `Retry-After` headers and using exponential backoff.
 
 ## Prerequisites
 
@@ -49,7 +52,7 @@ python3 uzmanposta.py --section "MailLogger:domain-outgoing"
 ## CLI Arguments
 
 | Argument | Description | Default |
-|----------|-------------|---------|
+| --- | --- | --- |
 | `--config PATH` | Path to the INI configuration file. | `uzmanposta.ini` |
 | `--section NAME` | Run only a specific section from the config. | - |
 | `--all` | Process all sections starting with `[MailLogger:*]`. | `False` |
@@ -155,7 +158,9 @@ To prevent data corruption, a cross-platform file locking mechanism is used:
 This is a common issue on Windows when multiple threads try to write/rename files simultaneously while an antivirus scanner or the OS locks them. The script includes a retry mechanism (`_safe_replace`) to handle this transient error automatically.
 
 ### API Throttling ("Too Many Requests")
-If you see HTTP 429 errors or timeouts, reduce the concurrency:
+
+The script automatically handles HTTP 429 errors by waiting according to the `Retry-After` header. However, if throttling persists:
+
 - Decrease `--max-workers` (e.g., from 5 to 2).
 - Decrease `max_parallel_details` in `uzmanposta.ini` (e.g., set to 1 or 2).
 
