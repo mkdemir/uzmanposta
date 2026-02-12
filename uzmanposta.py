@@ -79,42 +79,40 @@ class Metrics:
     min_api_time: float = float('inf')
     max_api_time: float = 0.0
     start_time: float = field(default_factory=time.perf_counter)
-    
+
     def record_api_call(self, duration: float) -> None:
         """Record an API call with its duration."""
         self.api_calls += 1
         self.total_api_time += duration
-        if duration < self.min_api_time:
-            self.min_api_time = duration
-        if duration > self.max_api_time:
-            self.max_api_time = duration
-    
+        self.min_api_time = min(self.min_api_time, duration)
+        self.max_api_time = max(self.max_api_time, duration)
+
     @property
     def avg_api_time(self) -> float:
         """Calculate average API response time."""
         return self.total_api_time / self.api_calls if self.api_calls > 0 else 0.0
-    
+
     @property
     def error_rate(self) -> float:
         """Calculate error rate as percentage."""
         total = self.logs_processed + self.errors_count
         return (self.errors_count / total * 100) if total > 0 else 0.0
-    
+
     @property
     def elapsed_time(self) -> float:
         """Calculate total elapsed time in seconds."""
         return time.perf_counter() - self.start_time
-    
+
     @property
     def logs_per_second(self) -> float:
         """Calculate throughput as logs per second."""
         return self.logs_processed / self.elapsed_time if self.elapsed_time > 0 else 0.0
-    
+
     @property
     def avg_logs_per_api_call(self) -> float:
         """Calculate average logs retrieved per API call."""
         return self.logs_processed / self.api_calls if self.api_calls > 0 else 0.0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert metrics to dictionary for serialization."""
         return {
@@ -122,7 +120,10 @@ class Metrics:
             'errors_count': self.errors_count,
             'api_calls': self.api_calls,
             'avg_api_time_ms': round(self.avg_api_time * 1000, 2),
-            'min_api_time_ms': round(self.min_api_time * 1000, 2) if self.min_api_time != float('inf') else 0.0,
+            'min_api_time_ms': (
+                round(self.min_api_time * 1000, 2)
+                if self.min_api_time != float('inf') else 0.0
+            ),
             'max_api_time_ms': round(self.max_api_time * 1000, 2),
             'error_rate_percent': round(self.error_rate, 2),
             'elapsed_time_seconds': round(self.elapsed_time, 2),
@@ -142,7 +143,7 @@ class MailLogger:
         config: MailLoggerConfig instance containing all settings
         metrics: Metrics instance for tracking runtime statistics
     """
-    
+
     # Global shutdown event shared across all instances
     _shutdown_event = threading.Event()
 
@@ -155,17 +156,21 @@ class MailLogger:
         """
         self.config = config
         self.metrics = Metrics()
-        
+
         # Ensure directories exist
         os.makedirs(self.config.log_directory, exist_ok=True)
         if self.config.position_file:
             os.makedirs(os.path.dirname(os.path.abspath(self.config.position_file)), exist_ok=True)
         if self.config.lock_file_path:
             os.makedirs(os.path.dirname(os.path.abspath(self.config.lock_file_path)), exist_ok=True)
-            
+
         self._setup_signal_handlers()
         self.setup_logging()
-        
+
+        # Initialize lock attributes for pylint (W0201)
+        self.lock_file_path = None
+        self.lock_file = None
+
         # Initialize session and headers
         self.auth_headers = {'Authorization': f'Bearer {self.config.api_key}'}
         self.session = requests.Session() if self.config.use_session else None
@@ -190,7 +195,7 @@ class MailLogger:
     def _handle_shutdown(self, signum: int, frame: Any) -> None:
         """
         Handle shutdown signals gracefully.
-        
+
         Args:
             signum: Signal number received
             frame: Current stack frame
@@ -207,10 +212,10 @@ class MailLogger:
     def _parse_api_error(self, response: requests.Response) -> str:
         """
         Parses detailed error information from an API response.
-        
+
         Args:
             response: The requests.Response object from the failed call
-            
+
         Returns:
             A formatted string containing status code and detailed error message if available
         """
@@ -221,9 +226,9 @@ class MailLogger:
             406: "Not Acceptable"
         }
         status_text = status_map.get(status_code, response.reason)
-        
+
         error_details = [f"HTTP {status_code} ({status_text})"]
-        
+
         try:
             error_json = response.json()
             if isinstance(error_json, dict):
@@ -233,7 +238,7 @@ class MailLogger:
                 for field in fields:
                     if field in error_json:
                         details.append(f"{field}: {error_json[field]}")
-                
+
                 if details:
                     error_details.append(" | ".join(details))
         except (ValueError, TypeError):
@@ -241,7 +246,7 @@ class MailLogger:
             if response.text:
                 snippet = response.text[:200] + ("..." if len(response.text) > 200 else "")
                 error_details.append(f"Response body: {snippet}")
-                
+
         return " - ".join(error_details)
 
     def log_message(self, message: str) -> None:
@@ -262,8 +267,8 @@ class MailLogger:
 
     def _safe_replace(self, src: str, dst: str, max_retries: int = 5, delay: float = 0.5) -> None:
         """
-        Safely replace a file with retries to handle transient transient 'Access is denied' errors on Windows.
-        
+        Safely replace a file with retries to handle transient 'Access is denied' errors on Windows.
+
         Args:
             src: Source file path
             dst: Destination file path
@@ -311,18 +316,18 @@ class MailLogger:
             # Create a file handler for the general messages using the configured file name
             # Allow full path and strftime-style date formatting in config
             resolved_filename = datetime.now().strftime(self.config.message_log_file_name)
-            
-            # If the resolved path is absolute, use it directly. 
+
+            # If the resolved path is absolute, use it directly.
             # Otherwise, join it with our structured log directory.
             if os.path.isabs(resolved_filename):
                 message_log_file_path = resolved_filename
             else:
                 message_log_file_path = os.path.join(self.config.log_directory, resolved_filename)
-            
+
             message_dir = os.path.dirname(message_log_file_path)
             if message_dir and not os.path.exists(message_dir):
                 os.makedirs(message_dir, exist_ok=True)
-                
+
             message_file_handler = logging.FileHandler(message_log_file_path, encoding='utf-8')
             message_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
 
@@ -343,7 +348,7 @@ class MailLogger:
     def cleanup_old_message_logs(self, retention_count: int = 2) -> None:
         """
         Deletes old message log files keeping only the most recent `retention_count` files.
-        
+
         Args:
             retention_count: Number of recent log files to keep
         """
@@ -354,8 +359,8 @@ class MailLogger:
         if not has_date_tokens:
             if hasattr(self, "message_logger"):
                 self.message_logger.info(
-                    "message_log_retention_count is set but message_log_file_name has no date/time tokens; "
-                    "skipping old message log cleanup."
+                    "message_log_retention_count is set but message_log_file_name has no "
+                    "date/time tokens; skipping old message log cleanup."
                 )
             return
 
@@ -398,7 +403,7 @@ class MailLogger:
     def cleanup_old_error_logs(self, retention_count: int = 2) -> None:
         """
         Deletes old error log files keeping only the most recent `retention_count` files.
-        
+
         Args:
             retention_count: Number of recent log files to keep
         """
@@ -458,9 +463,12 @@ class MailLogger:
             display_domain = self.config.domain if self.config.domain else 'global'
             filename_format = filename_format.replace('{domain}', display_domain)
             # For authentication, use 'auth' instead of the default log_type
-            type_value = 'auth' if self.config.api_category == 'authentication' else self.config.log_type
+            type_value = (
+                'auth' if self.config.api_category == 'authentication'
+                else self.config.log_type
+            )
             filename_format = filename_format.replace('{type}', type_value)
-            
+
             return os.path.join(self.config.log_directory, datetime.now().strftime(filename_format))
         except ValueError as e:
             self.log_error(f"Invalid log file name format: {e}")
@@ -490,7 +498,7 @@ class MailLogger:
 
         if not os.access(position_dir, os.W_OK):
             raise PermissionError(f"Position file directory '{position_dir}' is not writable.")
-        
+
         # Atomic write: write to temp file, then rename
         temp_file = f"{self.config.position_file}.tmp"
         try:
@@ -498,11 +506,11 @@ class MailLogger:
                 file.write(str(endtime))
                 # Ensure all buffers are flushed to OS
                 file.flush()
-                os.fsync(file.fileno())  
-            
+                os.fsync(file.fileno())
+
             # Use safe replace with retries for Windows robustness
             self._safe_replace(temp_file, self.config.position_file)
-                
+
         except (IOError, PermissionError, OSError) as e:
             self.log_error(f"Failed to save last position (timestamp={endtime}): {e}")
             # Clean up temp file if it exists
@@ -525,7 +533,8 @@ class MailLogger:
         """
         if os.path.exists(self.config.position_file):
             if not os.access(self.config.position_file, os.R_OK):
-                raise PermissionError(f"Position file '{self.config.position_file}' is not readable.")
+                raise PermissionError(
+                    f"Position file '{self.config.position_file}' is not readable.")
             try:
                 with open(self.config.position_file, 'r', encoding='utf-8') as file:
                     return int(file.read().strip())
@@ -536,7 +545,7 @@ class MailLogger:
     def update_heartbeat(self, status: str = "running") -> None:
         """
         Updates heartbeat file with current status and metrics.
-        
+
         Args:
             status: Current status string (running, completed, error)
         """
@@ -552,7 +561,7 @@ class MailLogger:
         except IOError as e:
             self.log_error(f"Failed to update heartbeat: {e}")
 
-    def retrieve_logs(self, starttime: int, endtime: int, retries: Optional[int] = None, 
+    def retrieve_logs(self, starttime: int, endtime: int, retries: Optional[int] = None,
                       sleep_time: Optional[int] = None, chunk_size: int = 500) -> int:
         """
         Retrieves mail logs from API within specified time range.
@@ -583,7 +592,7 @@ class MailLogger:
 
         retries = retries or self.config.list_retries
         sleep_time = sleep_time or self.config.list_sleep_time
-        
+
         while intervals:
             # Check for shutdown request
             if self._shutdown_requested:
@@ -592,10 +601,10 @@ class MailLogger:
                     self.process_logs(buffer)
                 self.save_last_position(last_processed_time)
                 break
-                
+
             s, e = intervals.pop()
             count_all = 0 # Track if we successfully got data for this interval
-            
+
             # Category-specific parameters
             params = {
                 'starttime': s,
@@ -606,33 +615,39 @@ class MailLogger:
                 params['type'] = self.config.log_type
             if self.config.domain:
                 params['domain'] = self.config.domain
-                
-            self.log_message(f"Retrieving logs for category '{self.config.api_category}' with params: {params}")
+
+            self.log_message(
+                f"Retrieving logs for category '{self.config.api_category}' with params: {params}")
 
             attempt = 0
             success = False
             while attempt < retries:
                 if self._shutdown_requested:
                     break
-                    
+
                 try:
-                    self.log_message(f"Attempt {attempt + 1} to retrieve mail logs for range [{s}, {e}]")
-                    
+                    self.log_message(
+                        f"Attempt {attempt + 1} to retrieve mail logs for range [{s}, {e}]")
+
                     # Track API timing
                     api_start = time.perf_counter()
                     # Use session if enabled, otherwise direct request with headers
                     if self.session:
-                        response = self.session.get(self.config.url, params=params, timeout=self.config.list_timeout)
+                        response = self.session.get(
+                            self.config.url, params=params, timeout=self.config.list_timeout)
                     else:
-                        response = requests.get(self.config.url, headers=self.auth_headers, params=params, timeout=self.config.list_timeout)
+                        response = requests.get(
+                            self.config.url, headers=self.auth_headers, params=params,
+                            timeout=self.config.list_timeout)
                     api_elapsed = time.perf_counter() - api_start
                     self.metrics.record_api_call(api_elapsed)
-                    
+
                     response.raise_for_status()
                     try:
                         data = response.json()
                     except ValueError:
-                        self.log_error(f"JSON decode error: {response.text}", request_info=response.url)
+                        self.log_error(
+                            f"JSON decode error: {response.text}", request_info=response.url)
                         raise
                     count_all = len(data)
                     self.log_message(f"Retrieved {count_all} logs for range [{s}, {e}]")
@@ -640,21 +655,23 @@ class MailLogger:
                     # If page is full, split the interval iteratively
                     if count_all >= self.config.max_records_per_page and e - s > 1:
                         mid = (s + e) // 2
-                        self.log_message(f"Max page size reached; splitting into [{s}, {mid}] and [{mid}, {e}]")
+                        self.log_message(
+                            f"Max page size reached; splitting into [{s}, {mid}] and [{mid}, {e}]")
                         intervals.append((mid, e))
                         intervals.append((s, mid))
                         break  # move to next interval from stack
 
                     total_jobs_in_page = 0
-                    processing_sequence = [] # List of (type, data) where type is 'log' or 'job' (with index)
+                    # List of (type, data) where type is 'log' or 'job' (with index)
+                    processing_sequence = []
                     job_details = [] # List of (queue_id, time)
-                    
+
                     # Prepare sequence in chronological order
                     if self.config.api_category == 'mail':
                         for item in reversed(data):
                             queue_id = item.get('queue_id')
                             recipients = item.get('recipients', [])
-                            
+
                             if queue_id and recipients:
                                 recipient = recipients[0]
                                 queue_id_time = recipient.get('time')
@@ -663,7 +680,7 @@ class MailLogger:
                                     job_details.append((queue_id, queue_id_time))
                                     total_jobs_in_page += 1
                                     continue
-                            
+
                             processing_sequence.append(('log', item))
                     else:
                         # Quarantine / Authentication
@@ -672,19 +689,23 @@ class MailLogger:
 
                     # Process jobs in parallel chunks
                     if job_details:
-                        self.log_message(f"Processing {total_jobs_in_page} detailed logs in parallel chunks...")
+                        self.log_message(
+                            f"Processing {total_jobs_in_page} detailed logs in parallel chunks...")
                         sub_batch_size = max(self.config.max_parallel_details * 5, 50)
-                        
+
                         for i in range(0, total_jobs_in_page, sub_batch_size):
                             if self._shutdown_requested:
                                 break
-                                
+
                             chunk_indices = range(i, min(i + sub_batch_size, total_jobs_in_page))
                             chunk_details = [job_details[idx] for idx in chunk_indices]
-                            
-                            with ThreadPoolExecutor(max_workers=self.config.max_parallel_details) as executor:
-                                futures = [executor.submit(self.retrieve_detailed_log, d[0], d[1]) for d in chunk_details]
-                                
+
+                            with ThreadPoolExecutor(
+                                    max_workers=self.config.max_parallel_details) as executor:
+                                futures = [executor.submit(
+                                               self.retrieve_detailed_log, d[0],
+                                               d[1]) for d in chunk_details]
+
                                 results = []
                                 for future in futures:
                                     try:
@@ -702,7 +723,9 @@ class MailLogger:
                             # Update progress
                             current_completed = min(i + sub_batch_size, total_jobs_in_page)
                             percent = (current_completed / total_jobs_in_page) * 100
-                            self.log_message(f"Progress: {current_completed}/{total_jobs_in_page} ({percent:.1f}%)")
+                            self.log_message(
+                                f"Progress: {current_completed}/{total_jobs_in_page} "
+                                f"({percent:.1f}%)")
                             # Short interruptible breather
                             MailLogger._shutdown_event.wait(0.01)
 
@@ -713,7 +736,7 @@ class MailLogger:
                                 item = job_details[content]
                             else:
                                 item = content
-                            
+
                             if not item:
                                 continue
 
@@ -728,8 +751,9 @@ class MailLogger:
                                     item_time = item.get('time')
                             else:
                                 # Use timestamp or time for Quarantine/Auth
-                                item_time = item.get('time') or item.get('timestamp') or item.get('starttime')
-                            
+                                item_time = item.get('time') or item.get(
+                                    'timestamp') or item.get('starttime')
+
                             if item_time:
                                 last_processed_time = item_time
 
@@ -751,9 +775,12 @@ class MailLogger:
                     attempt += 1
                     self.metrics.errors_count += 1
                     detailed_error = self._parse_api_error(http_error.response)
-                    url_with_params = http_error.response.url if http_error.response is not None else self.config.url
+                    url_with_params = (
+                        http_error.response.url if http_error.response is not None
+                        else self.config.url
+                    )
                     duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
-                    
+
                     # HTTP 429 Rate Limit handling
                     if http_error.response is not None and http_error.response.status_code == 429:
                         retry_after = http_error.response.headers.get('Retry-After')
@@ -763,7 +790,8 @@ class MailLogger:
                             except ValueError:
                                 wait_seconds = 60
                             self.log_error(
-                                f"Rate Limited (HTTP 429) for {url_with_params}. Retry-After: {retry_after}s (attempt {attempt})",
+                                f"Rate Limited (HTTP 429) for {url_with_params}. "
+                                f"Retry-After: {retry_after}s (attempt {attempt})",
                                 request_info=url_with_params, duration_ms=duration_ms
                             )
                             if attempt < retries:
@@ -771,16 +799,18 @@ class MailLogger:
                             continue
                         else:
                             self.log_error(
-                                f"Rate Limited (HTTP 429) for {url_with_params}. No Retry-After header (attempt {attempt})",
+                                f"Rate Limited (HTTP 429) for {url_with_params}. "
+                                f"No Retry-After header (attempt {attempt})",
                                 request_info=url_with_params, duration_ms=duration_ms
                             )
                             if attempt < retries:
                                 delay = min(sleep_time * (2 ** (attempt - 1)), 60)
                                 MailLogger._shutdown_event.wait(delay)
                             continue
-                    
+
                     self.log_error(
-                        f"API HTTP Error for URL {url_with_params} (attempt {attempt}): {detailed_error}",
+                        f"API HTTP Error for URL {url_with_params} (attempt {attempt}): "
+                        f"{detailed_error}",
                         request_info=url_with_params, duration_ms=duration_ms
                     )
                     if attempt < retries:
@@ -789,26 +819,29 @@ class MailLogger:
                 except requests.exceptions.RequestException as req_error:
                     attempt += 1
                     self.metrics.errors_count += 1
-                    failed_url = getattr(req_error.request, 'url', self.config.url) if hasattr(req_error, 'request') else self.config.url
+                    failed_url = getattr(
+                        req_error.request, 'url', self.config.url) if hasattr(
+                        req_error, 'request') else self.config.url
                     duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
-                    
+
                     # Classify the connection error
                     error_label = self._classify_connection_error(req_error, failed_url)
                     self.log_error(
                         f"{error_label} for {failed_url} (attempt {attempt}): {req_error}",
                         request_info=failed_url, duration_ms=duration_ms
                     )
-                    
+
                     if attempt < retries:
                         delay = min(sleep_time * (2 ** (attempt - 1)), 60)
                         MailLogger._shutdown_event.wait(delay)
                 except ValueError:
                     raise
                 except Exception as unexpected_error:
-                    self.log_error(f"Unexpected error: {unexpected_error}", request_info=self.config.url)
+                    self.log_error(
+                        f"Unexpected error: {unexpected_error}", request_info=self.config.url)
                     self.metrics.errors_count += 1
                     raise
-            
+
             if success:
                 # Finished a page or interval portion successfully
                 if buffer:
@@ -819,7 +852,8 @@ class MailLogger:
                 self.save_last_position(last_processed_time)
             elif not self._shutdown_requested and count_all < self.config.max_records_per_page:
                 # If we didn't succeed and it wasn't a split, raise
-                raise Exception(f"Failed to retrieve logs for range [{s}, {e}] after {retries} attempts.")
+                raise Exception(
+                    f"Failed to retrieve logs for range [{s}, {e}] after {retries} attempts.")
 
         # Döngü bittikten sonra kalan buffer'ı da yaz
         if buffer:
@@ -828,10 +862,13 @@ class MailLogger:
 
         self.save_last_position(last_processed_time)  # Final checkpoint
 
-        self.log_message(f"Finished retrieving {self.config.api_category} logs, processed {total_processed} items")
+        self.log_message(
+            f"Finished retrieving {self.config.api_category} logs, "
+            f"processed {total_processed} items"
+        )
         return total_processed
 
-    def retrieve_detailed_log(self, queue_id: str, event_time: int, retries: Optional[int] = None, 
+    def retrieve_detailed_log(self, queue_id: str, event_time: int, retries: Optional[int] = None,
                              sleep_time: Optional[int] = None) -> Dict[str, Any]:
         """
         Retrieves detailed log information for specific mail event.
@@ -859,12 +896,15 @@ class MailLogger:
                 # Track API timing
                 api_start = time.perf_counter()
                 if self.session:
-                    response = self.session.get(detailed_log_url, timeout=self.config.detail_timeout)
+                    response = self.session.get(
+                        detailed_log_url, timeout=self.config.detail_timeout)
                 else:
-                    response = requests.get(detailed_log_url, headers=self.auth_headers, timeout=self.config.detail_timeout)
+                    response = requests.get(
+                        detailed_log_url, headers=self.auth_headers,
+                        timeout=self.config.detail_timeout)
                 api_elapsed = time.perf_counter() - api_start
                 self.metrics.record_api_call(api_elapsed)
-                
+
                 response.raise_for_status()
                 try:
                     detailed_log = response.json()
@@ -884,9 +924,12 @@ class MailLogger:
             except requests.exceptions.HTTPError as http_error:
                 attempt += 1
                 detailed_error = self._parse_api_error(http_error.response)
-                url_with_params = http_error.response.url if http_error.response is not None else detailed_log_url
+                url_with_params = (
+                    http_error.response.url if http_error.response is not None
+                    else detailed_log_url
+                )
                 duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
-                
+
                 # HTTP 429 Rate Limit handling
                 if http_error.response is not None and http_error.response.status_code == 429:
                     retry_after = http_error.response.headers.get('Retry-After')
@@ -896,7 +939,8 @@ class MailLogger:
                         except ValueError:
                             wait_seconds = 60
                         self.log_error(
-                            f"Rate Limited (HTTP 429) for {url_with_params}. Retry-After: {retry_after}s (attempt {attempt})",
+                            f"Rate Limited (HTTP 429) for {url_with_params}. "
+                            f"Retry-After: {retry_after}s (attempt {attempt})",
                             request_info=url_with_params, duration_ms=duration_ms
                         )
                         if attempt < retries:
@@ -904,12 +948,13 @@ class MailLogger:
                         else:
                             raise
                         continue
-                
+
                 if attempt < retries:
                     MailLogger._shutdown_event.wait(sleep_time)
                 else:
                     self.log_error(
-                        f"API HTTP Error for URL {url_with_params} after {retries} attempts: {detailed_error}",
+                        f"API HTTP Error for URL {url_with_params} after {retries} "
+                        f"attempts: {detailed_error}",
                         request_info=url_with_params, duration_ms=duration_ms
                     )
                     raise
@@ -921,14 +966,17 @@ class MailLogger:
                 else:
                     # Classify connection errors
                     if isinstance(detail_error, requests.exceptions.RequestException):
-                        error_label = self._classify_connection_error(detail_error, detailed_log_url)
+                        error_label = self._classify_connection_error(
+                            detail_error, detailed_log_url)
                         self.log_error(
-                            f"{error_label} for {detailed_log_url} after {retries} attempts: {detail_error}",
+                            f"{error_label} for {detailed_log_url} after {retries} "
+                            f"attempts: {detail_error}",
                             request_info=detailed_log_url, duration_ms=duration_ms
                         )
                     else:
                         self.log_error(
-                            f"Failed to retrieve detailed log from {detailed_log_url} after {retries} attempts: {detail_error}",
+                            f"Failed to retrieve detailed log from {detailed_log_url} "
+                            f"after {retries} attempts: {detail_error}",
                             request_info=detailed_log_url, duration_ms=duration_ms
                         )
                     raise
@@ -936,10 +984,10 @@ class MailLogger:
     def _mask_api_key(self, api_key: str) -> str:
         """
         Masks the API key for safe logging, showing only first and last 4 characters.
-        
+
         Args:
             api_key: The full API key
-            
+
         Returns:
             Masked API key string (e.g., 'abcd...1234')
         """
@@ -950,10 +998,10 @@ class MailLogger:
     def _check_dns(self, url: str) -> bool:
         """
         Verifies if the hostname in the URL can be resolved.
-        
+
         Args:
             url: The URL to check
-            
+
         Returns:
             True if hostname resolves or URL is invalid/no hostname, False if DNS resolution fails
         """
@@ -971,36 +1019,42 @@ class MailLogger:
     def _classify_connection_error(self, error: Exception, url: str) -> str:
         """
         Classifies a connection error into a human-readable category.
-        
+
         Args:
             error: The exception to classify
             url: The URL that caused the error
-            
+
         Returns:
             A descriptive error label string
         """
         error_str = str(error).lower()
-        
+
         # Check for timeout
-        if isinstance(error, requests.exceptions.Timeout) or 'timeout' in error_str or 'timed out' in error_str:
+        if (isinstance(error, requests.exceptions.Timeout) or
+                'timeout' in error_str or 'timed out' in error_str):
             return "Connection Timeout"
-        
+
         # Check for connection refused
         if isinstance(error, requests.exceptions.ConnectionError):
-            if 'connection refused' in error_str or '[errno 111]' in error_str or '[winerror 10061]' in error_str:
+            if ('connection refused' in error_str or '[errno 111]' in error_str or
+                    '[winerror 10061]' in error_str):
                 return "Connection Refused"
             # Check for DNS failure
             if not self._check_dns(url):
-                return "DNS Resolution Failed. Please check your internet connection or DNS settings"
+                return (
+                    "DNS Resolution Failed. Please check your internet connection or DNS settings"
+                )
             return "Connection Error"
-        
+
         # Check for SSL errors
         if 'ssl' in error_str or 'certificate' in error_str:
             return "SSL/TLS Error"
-        
+
         return "Request Error"
 
-    def log_error(self, error_message: str, request_info: Optional[str] = None, duration_ms: Optional[float] = None) -> None:
+    def log_error(
+            self, error_message: str, request_info: Optional[str]=None,
+            duration_ms: Optional[float]=None) ->None:
         """
         Logs error messages to file with timestamp.
 
@@ -1021,11 +1075,11 @@ class MailLogger:
         if duration_ms is not None:
             error_data["duration_ms"] = duration_ms
         error_json = json.dumps(error_data, ensure_ascii=False)
-        
+
         # Use timestamped filename if pattern has date tokens
         pattern = self.config.error_log_file_name
         has_date_tokens = any(tok in pattern for tok in ("%Y", "%y", "%m", "%d", "%H", "%M", "%S"))
-        
+
         if has_date_tokens:
             resolved_filename = datetime.now().strftime(pattern)
             if os.path.isabs(resolved_filename):
@@ -1035,12 +1089,12 @@ class MailLogger:
         else:
             suffix = f"_{self.config.section_name}" if self.config.section_name else ""
             error_log_path = os.path.join(self.config.log_directory, f'errors{suffix}.log')
-            
+
         try:
             error_dir = os.path.dirname(error_log_path)
             if error_dir and not os.path.exists(error_dir):
                 os.makedirs(error_dir, exist_ok=True)
-                
+
             with open(error_log_path, 'a', encoding='utf-8') as log_file:
                 log_file.write(error_json + "\n")
         except Exception as e:
@@ -1058,41 +1112,50 @@ class MailLogger:
         position tracking after each successful interval retrieval.
         """
         endtime = int(datetime.now().timestamp())  # Get the current time as Unix timestamp
-        self.log_message(f"End time: {endtime} ({datetime.fromtimestamp(endtime).strftime('%Y-%m-%d %H:%M:%S')})")
+        self.log_message(
+            f"End time: {endtime} ("
+            f"{datetime.fromtimestamp(endtime).strftime('%Y-%m-%d %H:%M:%S')})")
         last_position = self.load_last_position()
         if last_position is not None:
             start_time = last_position
         else:
             start_time = self.config.start_time
-        
-        self.log_message(f"Start time: {start_time} ({datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')})")
-        
+
+        self.log_message(
+            f"Start time: {start_time} ("
+            f"{datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')})")
+
         # Enforce 7-day limit for quarantine category
         if self.config.api_category == 'quarantine':
             seven_days_ago = int(datetime.now().timestamp()) - (7 * 24 * 60 * 60)
             if start_time < seven_days_ago:
                 self.log_message(
                     f"WARNING: Quarantine logs have a 7-day lookback limit. "
-                    f"Clipping start_time from {datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')} "
-                    f"to {datetime.fromtimestamp(seven_days_ago).strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                    f"Clipping start_time from "
+                    f"{datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"to {datetime.fromtimestamp(seven_days_ago).strftime('%Y-%m-%d %H:%M:%S')}")
                 start_time = seven_days_ago
 
         # Validate: start_time cannot be greater than end_time
         if start_time >= endtime:
-            self.log_message(f"WARNING: start_time ({start_time}) is greater than or equal to end_time ({endtime}). Skipping log retrieval.")
+            self.log_message(
+                f"WARNING: start_time ({start_time}) is greater than or equal to "
+                f"end_time ({endtime}). Skipping log retrieval.")
             return
-        
+
         time_diff = endtime - start_time
         fourteen_days_seconds = 14 * 24 * 60 * 60
         max_allowed_gap = min(self.config.max_time_gap, fourteen_days_seconds)
-        chunk_size = min(self.config.split_interval, max_allowed_gap) if self.config.split_interval else max_allowed_gap
-        
-        self.log_message(f"Starting {self.config.api_category} log retrieval from {start_time} to {endtime}")
+        chunk_size = min(self.config.split_interval,
+                         max_allowed_gap) if self.config.split_interval else max_allowed_gap
+
+        self.log_message(
+            f"Starting {self.config.api_category} log retrieval from {start_time} to {endtime}")
 
         total_processed = 0
 
-        # If the time difference exceeds the maximum allowed gap, split the request into smaller intervals
+        # If the time difference exceeds the maximum allowed gap,
+        # split the request into smaller intervals
         if time_diff > chunk_size:
             current_time = start_time
             # Split the time range into intervals and fetch logs for each interval
@@ -1100,10 +1163,11 @@ class MailLogger:
                 if self._shutdown_requested:
                     self.log_message("Shutdown requested during interval processing")
                     break
-                    
+
                 # Use configured chunk size but never exceed the allowed gap
                 next_time = min(current_time + chunk_size, endtime)
-                self.log_message(f"Fetching {self.config.api_category} logs from {current_time} to {next_time}")
+                self.log_message(
+                    f"Fetching {self.config.api_category} logs from {current_time} to {next_time}")
                 # Logs are streamed and written inside retrieve_logs
                 processed = self.retrieve_logs(current_time, next_time)
                 total_processed += processed
@@ -1111,7 +1175,8 @@ class MailLogger:
                 current_time = next_time  # Update the current time for the next interval
         else:
             # If the time difference is small enough, fetch the logs in a single request
-            self.log_message(f"Fetching {self.config.api_category} logs from {start_time} to {endtime}")
+            self.log_message(
+                f"Fetching {self.config.api_category} logs from {start_time} to {endtime}")
             # Logs are streamed and written inside retrieve_logs
             processed = self.retrieve_logs(start_time, endtime)
             total_processed += processed
@@ -1137,7 +1202,7 @@ class MailLogger:
             IOError: If another instance is already running
         """
         self.lock_file_path = lock_file_path
-        self.lock_file = open(self.lock_file_path, 'w')
+        self.lock_file = open(self.lock_file_path, 'w', encoding='utf-8')
         try:
             if os.name == 'nt':
                 msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -1186,18 +1251,18 @@ class MailLogger:
             logs: List of log entries to process
         """
         log_file_name = self.generate_log_file_name()
-        
+
         # Email logger configuration - only for email logs
         # Use instance email_logger to align with log_email()
         email_logger = self.email_logger
         # Configure handler for email logs
         email_handler = logging.FileHandler(log_file_name, encoding='utf-8')
         email_handler.setFormatter(logging.Formatter('%(message)s'))
-        
+
         # Remove any existing handlers to prevent duplicate logging
         for handler in email_logger.handlers[:]:
             email_logger.removeHandler(handler)
-        
+
         email_logger.addHandler(email_handler)
 
         # Save only the email logs
@@ -1247,25 +1312,30 @@ class MailLogger:
 
 if __name__ == "__main__":
     import argparse
-    
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Uzman Posta Mail Event Logger')
-    parser.add_argument('--config', default='uzmanposta.ini', help='Config file path (default: uzmanposta.ini)')
-    parser.add_argument('--section', help='Specific section to run (e.g., MailLogger:domain-incoming)')
+    parser.add_argument('--config', default='uzmanposta.ini',
+                        help='Config file path (default: uzmanposta.ini)')
+    parser.add_argument(
+        '--section', help='Specific section to run (e.g., MailLogger:domain-incoming)')
     parser.add_argument('--all', action='store_true', help='Run all configured sections')
-    parser.add_argument('--parallel', action='store_true', help='Run sections in parallel (requires --all)')
-    parser.add_argument('--max-workers', type=int, default=5, help='Maximum number of parallel workers (default: 5)')
+    parser.add_argument('--parallel', action='store_true',
+                        help='Run sections in parallel (requires --all)')
+    parser.add_argument(
+        '--max-workers', type=int, default=5,
+        help='Maximum number of parallel workers (default: 5)')
     parser.add_argument('--list', action='store_true', help='List all available sections and exit')
     args = parser.parse_args()
 
     # Establish script directory for path resolution
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     # Check if config file exists
     config_file = args.config
     if not os.path.isabs(config_file):
         config_file = os.path.abspath(os.path.join(script_dir, config_file))
-        
+
     if not os.path.exists(config_file):
         print(f"Configuration file '{config_file}' not found.")
         sys.exit(1)
@@ -1284,66 +1354,73 @@ if __name__ == "__main__":
             return section_name.split(':', 1)[1]
         return 'default'
 
-    def create_config_for_section(cfg: configparser.ConfigParser, section_name: str) -> Tuple[MailLoggerConfig, str]:
+    def create_config_for_section(
+            cfg: configparser.ConfigParser,
+            section_name: str) -> Tuple[MailLoggerConfig, str]:
         """Create MailLoggerConfig from a config section."""
         suffix = get_section_suffix(section_name)
-        
+
         # Establish script directory for relative path resolution
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        
+
         # Read values with fallbacks from DEFAULT section
         api_key = cfg.get(section_name, 'api_key')
-        
+
         # Validate: API key cannot be empty
         if not api_key or api_key.strip() == '' or api_key == 'YOUR_API_KEY_HERE':
-            raise ValueError(f"Section {section_name}: 'api_key' is required and cannot be empty or placeholder.")
-        
+            raise ValueError(
+                f"Section {section_name}: 'api_key' is required and "
+                f"cannot be empty or placeholder.")
+
         domain = cfg.get(section_name, 'domain', fallback='')
         log_type = cfg.get(section_name, 'type', fallback='outgoinglog')
         api_category = cfg.get(section_name, 'category', fallback='mail')
-        
+
         # Determine URL based on category
         default_urls = {
             'mail': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/mail',
             'quarantine': 'https://yenipanel-api.uzmanposta.com/api/v2/quarantines',
             'authentication': 'https://yenipanel.uzmanposta.com/api/v2/logs/authentication'
         }
-        
-        # Priority: 
+
+        # Priority:
         # 1. Explicitly set in the SECTION itself (ignore DEFAULT)
         # 2. Category-specific default
         # 3. If category is 'mail' (default), then fallback to [DEFAULT] section's 'url' if any
-        
+
         url = None
         # Check if URL is locally defined in this section
         if section_name in cfg._sections and 'url' in cfg._sections[section_name]:
             url = cfg._sections[section_name]['url']
-        
+
         if not url:
             # Use category default
             url = default_urls.get(api_category, default_urls['mail'])
-            
+
             # Special case for 'mail' category: allow [DEFAULT] url for backward compatibility
             if api_category == 'mail' and cfg.has_option('DEFAULT', 'url'):
                 url = cfg.get('DEFAULT', 'url')
-        
+
         # Log resolution detail for diagnostics
-        print(f"--- CONFIG DEBUG --- Section: {section_name} -> Category: {api_category}, URL: {url}")
-        
+        print(
+            f"--- CONFIG DEBUG --- Section: {section_name} -> Category: {api_category}, URL: {url}")
+
         if log_type in ['quarantine', 'hold'] and api_category == 'mail':
-             print(f"WARNING: Section {section_name} has type '{log_type}' but category is 'mail'. Did you forget 'category = quarantine'?")
-        
+            print(
+                f"WARNING: Section {section_name} has type '{log_type}' but "
+                f"category is 'mail'. Did you forget 'category = quarantine'?")
+
         # Resolve log directory: if relative, make it relative to script_dir
         raw_log_dir = cfg.get(section_name, 'log_directory', fallback='./output')
         if not os.path.isabs(raw_log_dir):
             base_log_dir = os.path.abspath(os.path.join(script_dir, raw_log_dir))
         else:
             base_log_dir = raw_log_dir
-            
+
         # Construct detailed log directory: base/domain/category/type
         # If domain is empty (auth/quarantine might be global), use 'global'
         display_domain = domain if domain else 'global'
-        
+
         # For authentication category, skip the type subdirectory since it's not applicable
         # For quarantine, skip if type equals category to avoid quarantine/quarantine
         if api_category == 'authentication':
@@ -1354,15 +1431,15 @@ if __name__ == "__main__":
         else:
             # mail category always uses type, quarantine with 'hold' type uses subdirectory
             log_directory = os.path.join(base_log_dir, display_domain, api_category, log_type)
-        
+
         # Generate stable instance id for this section
         unique_id_string = f"{api_key}{domain}{log_type}{api_category}{url}"
         section_hash = hashlib.md5(unique_id_string.encode('utf-8')).hexdigest()[:8]
-        
+
         # Anchor positions and locks to script directory as well
         positions_dir = os.path.join(script_dir, 'positions')
         locks_dir = os.path.join(script_dir, 'locks')
-        
+
         # Position file: use config value or auto-generate
         position_file_config = cfg.get(section_name, 'position_file', fallback=None)
         if position_file_config:
@@ -1372,7 +1449,7 @@ if __name__ == "__main__":
                 res_pos = position_file_config.replace("{section}", suffix)
             else:
                 res_pos = position_file_config
-            
+
             # Ensure absolute path
             if not os.path.isabs(res_pos):
                 position_file = os.path.abspath(os.path.join(script_dir, res_pos))
@@ -1380,7 +1457,7 @@ if __name__ == "__main__":
                 position_file = res_pos
         else:
             position_file = os.path.join(positions_dir, f"{suffix}.pos")
-            
+
         # Lock file: use config value or auto-generate
         lock_file_config = cfg.get(section_name, 'lock_file_path', fallback=None)
         if lock_file_config:
@@ -1390,7 +1467,7 @@ if __name__ == "__main__":
                 res_lock = lock_file_config.replace("{section}", suffix)
             else:
                 res_lock = lock_file_config
-            
+
             # Ensure absolute path
             if not os.access(res_lock, os.F_OK) and not os.path.isabs(res_lock):
                 lock_file_path = os.path.abspath(os.path.join(script_dir, res_lock))
@@ -1398,7 +1475,7 @@ if __name__ == "__main__":
                 lock_file_path = res_lock
         else:
             lock_file_path = os.path.join(locks_dir, f"{suffix}.lock")
-            
+
         # Heartbeat file: use config value or auto-generate
         heartbeat_file_config = cfg.get(section_name, 'heartbeat_file', fallback=None)
         if heartbeat_file_config:
@@ -1406,57 +1483,57 @@ if __name__ == "__main__":
                 res_hb = heartbeat_file_config.replace("{section}", suffix)
             else:
                 res_hb = heartbeat_file_config
-            
+
             heartbeat_file = res_hb
         else:
             heartbeat_file = f"{suffix}_heartbeat.json"
-            
+
         # Create config dataclass
         mail_config = MailLoggerConfig(
-            api_key=api_key,
-            log_directory=log_directory,
-            log_file_name_format=cfg.get(section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
+            api_key=api_key, log_directory=log_directory, log_file_name_format=cfg.get(
+                section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
             position_file=position_file,
-            start_time=max(0, cfg.getint(section_name, 'start_time', fallback=int(datetime.now().timestamp()) - 60)),
-            domain=domain,
-            url=url,
-            log_type=log_type,
-            api_category=api_category,
+            start_time=max(
+                0, cfg.getint(
+                    section_name, 'start_time', fallback=int(datetime.now().timestamp()) -60)),
+            domain=domain, url=url, log_type=log_type, api_category=api_category,
             split_interval=cfg.getint(section_name, 'split_interval', fallback=300),
             max_time_gap=cfg.getint(section_name, 'max_time_gap', fallback=3600),
             verbose=cfg.getboolean(section_name, 'verbose', fallback=True),
-            message_log_file_name=cfg.get(section_name, 'message_log_file_name', fallback='messages_%Y-%m-%d_%H.log'),
-            message_log_retention_count=cfg.getint(section_name, 'message_log_retention_count', fallback=2),
+            message_log_file_name=cfg.get(
+                section_name, 'message_log_file_name', fallback='messages_%Y-%m-%d_%H.log'),
+            message_log_retention_count=cfg.getint(
+                section_name, 'message_log_retention_count', fallback=2),
             list_timeout=cfg.getint(section_name, 'list_timeout', fallback=300),
             detail_timeout=cfg.getint(section_name, 'detail_timeout', fallback=120),
             list_retries=cfg.getint(section_name, 'list_retries', fallback=10),
             list_sleep_time=cfg.getint(section_name, 'list_sleep_time', fallback=2),
             detail_retries=cfg.getint(section_name, 'detail_retries', fallback=10),
             detail_sleep_time=cfg.getint(section_name, 'detail_sleep_time', fallback=2),
-            max_records_per_page=cfg.getint(section_name, 'max_records_per_page', fallback=1000),
-            heartbeat_file=heartbeat_file,
-            lock_file_path=lock_file_path,
-            section_name=suffix,
+            max_records_per_page=cfg.getint(
+                section_name, 'max_records_per_page', fallback=1000),
+            heartbeat_file=heartbeat_file, lock_file_path=lock_file_path, section_name=suffix,
             max_parallel_details=cfg.getint(section_name, 'max_parallel_details', fallback=2),
             use_session=cfg.getboolean(section_name, 'use_session', fallback=True),
-            error_log_file_name=cfg.get(section_name, 'error_log_file_name', fallback='errors_%Y-%m-%d_%H.log'),
-            error_log_retention_count=cfg.getint(section_name, 'error_log_retention_count', fallback=2),
-        )
-        
+            error_log_file_name=cfg.get(
+                section_name, 'error_log_file_name', fallback='errors_%Y-%m-%d_%H.log'),
+            error_log_retention_count=cfg.getint(
+                section_name, 'error_log_retention_count', fallback=2),)
+
         return mail_config, lock_file_path
 
     def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
         """Run a single section. Returns True if successful, False if skipped/failed."""
         try:
             mail_config, lock_file_path = create_config_for_section(cfg, section_name)
-            
+
             # Ensure directories exist (thread-safe)
             for dir_path in ['./positions', './locks', mail_config.log_directory]:
                 os.makedirs(dir_path, exist_ok=True)
-            
+
             print(f"[{get_section_suffix(section_name)}] Starting...")
             print(f"[{get_section_suffix(section_name)}] Lock file: {lock_file_path}")
-            
+
             mail_logger = MailLogger(mail_config)
             mail_logger.acquire_lock(lock_file_path)
             try:
@@ -1465,7 +1542,7 @@ if __name__ == "__main__":
             finally:
                 mail_logger.close()
                 mail_logger.release_lock()
-                
+
         except SystemExit:
             # Lock already held by another instance
             print(f"[{get_section_suffix(section_name)}] Skipped (already running)")
@@ -1489,14 +1566,17 @@ if __name__ == "__main__":
 
     # Determine which sections to run
     sections_to_run: List[str] = []
-    
+
     if args.section:
         # Run specific section
         if args.section in config.sections():
             sections_to_run = [args.section]
         else:
             print(f"Section '{args.section}' not found in config.")
-            print(f"Available: {', '.join(multi_sections) if multi_sections else 'MailLogger (legacy)'}")
+            available_str = (
+                ', '.join(multi_sections) if multi_sections else 'MailLogger (legacy)'
+            )
+            print("Available: " + available_str)
             sys.exit(1)
     elif args.all:
         # Run all MailLogger:* sections
@@ -1527,16 +1607,19 @@ if __name__ == "__main__":
 
     # Run sections
     results = {'success': 0, 'skipped': 0, 'failed': 0}
-    
+
     try:
         if args.parallel and len(sections_to_run) > 1:
             # Parallel execution using ThreadPoolExecutor
             # Limit workers to prevent API throttling
             actual_workers = min(len(sections_to_run), args.max_workers)
-            print(f"Running {len(sections_to_run)} sections in parallel with {actual_workers} workers... (Press Ctrl+C to stop)")
+            print(
+                f"Running {len(sections_to_run)} sections in parallel with "
+                f"{actual_workers} workers... (Press Ctrl+C to stop)"
+            )
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 future_to_section = {
-                    executor.submit(run_section, config, section): section 
+                    executor.submit(run_section, config, section): section
                     for section in sections_to_run
                 }
                 try:
