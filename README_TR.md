@@ -1,6 +1,8 @@
 # Uzman Posta Mail Event Logger
 
-[English (İngilizce)](README.md)
+<p align="center">
+  <a href="README_TR.md">🇹🇷 Türkçe</a> | <a href="README.md">🇺🇸 English</a>
+</p>
 
 <p align="center">
 <img src="assets/uzmanposta-logo.png" alt="Uzman Posta Logo" width="400"/>
