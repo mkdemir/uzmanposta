@@ -39,7 +39,12 @@ else:
 
 @dataclass
 class MailLoggerConfig: # pylint: disable=too-many-instance-attributes
-    """Configuration dataclass for MailLogger settings."""
+    """
+    Configuration dataclass for MailLogger settings.
+    
+    Note: Quarantine logs have a strict 7-day retention limit in the API. 
+    The script automatically caps requests older than 6 days for safety.
+    """
     api_key: str
     log_directory: str
     position_file: str
@@ -589,6 +594,25 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             ValueError: If response JSON is invalid
         """
         effective_start = self.load_last_position() or starttime
+        
+        # Quarantine search limit: Using 6 days (instead of 7) for a safety margin.
+        # Reference: HTTP 406 message "Can make search 7 days before at most"
+        max_q_limit = 6 * 24 * 3600
+        is_quarantine = (self.config.log_type == 'quarantine' or self.config.api_category == 'quarantine')
+        
+        if is_quarantine:
+            # Retention limit: API only allows data from the last 7 days.
+            # We use a 6-day (max_q_limit) safety margin to avoid edge-case 406 errors.
+            now_ts = int(time.time())
+            min_allowed_start = now_ts - max_q_limit
+            
+            if effective_start < min_allowed_start:
+                self.log_message(
+                    f"IMPORTANT: Quarantine retention limit is 7 days. "
+                    f"Using 6-day safety margin. Capping start time to {min_allowed_start}."
+                )
+                effective_start = min_allowed_start
+        
         intervals: List[Tuple[int, int]] = [(effective_start, endtime)]
         buffer: List[Dict[str, Any]] = []
         total_processed = 0
