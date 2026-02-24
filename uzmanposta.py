@@ -608,7 +608,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             
             if effective_start < min_allowed_start:
                 self.log_message(
-                    f"IMPORTANT: Quarantine retention limit is 7 days. "
+                    "IMPORTANT: Quarantine retention limit is 7 days. "
                     f"Using 6-day safety margin. Capping start time to {min_allowed_start}."
                 )
                 effective_start = min_allowed_start
