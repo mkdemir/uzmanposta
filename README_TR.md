@@ -1,5 +1,7 @@
 # Uzman Posta Mail Event Logger
 
+[English (İngilizce)](README.md)
+
 <p align="center">
 <img src="assets/uzmanposta-logo.png" alt="Uzman Posta Logo" width="400"/>
 </p>
@@ -163,6 +165,7 @@ Betik, HTTP 429 hatalarını `Retry-After` başlığına göre bekleyerek otomat
 
 - `--max-workers` değerini düşürün (örneğin 5'ten 2'ye).
 - `uzmanposta.ini` içindeki `max_parallel_details` değerini düşürün (örneğin 1 veya 2 yapın).
+- **Karantina Saklama Sınırı**: Uzman Posta API karantina loglarını sadece **7 gün** saklar. Betik, güvenlik amacıyla **6 günlük bir marj** kullanır ve `HTTP 406` hatalarını önlemek için aramaları otomatik olarak son 6 günle sınırlandırır.
 
 ## Hukuki Uyarı
 

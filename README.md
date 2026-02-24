@@ -1,4 +1,6 @@
 # Uzman Posta Mail Event Logger
+  
+[Turkish (Türkçe)](README_TR.md)
 
 <p align="center">
 <img src="assets/uzmanposta-logo.png" alt="Uzman Posta Logo" width="400"/>
@@ -163,6 +165,7 @@ The script automatically handles HTTP 429 errors by waiting according to the `Re
 
 - Decrease `--max-workers` (e.g., from 5 to 2).
 - Decrease `max_parallel_details` in `uzmanposta.ini` (e.g., set to 1 or 2).
+- **Quarantine Retention Limit**: Uzman Posta API only stores quarantine logs for **7 days**. The script uses a **6-day safety margin** and will automatically cap searches to 6 days ago to prevent `HTTP 406` errors.
 
 ## Legal Disclaimer
 

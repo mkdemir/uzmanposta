@@ -90,7 +90,8 @@ type                 = outgoinglog
 # --- Section 3: Quarantine Logs ---
 [MailLogger:example-quarantine]
 api_key              = YOUR_API_KEY_HERE
-# Note: Quarantine logs have a strict 7-day lookback limit.
+# Note: Quarantine logs have a strict 7-day retention limit in the API.
+#       The script automatically caps searches to 6 days ago for safety.
 url                  = https://yenipanel.uzmanposta.com/api/v2/queue
 domain               = example.com
 category             = quarantine
