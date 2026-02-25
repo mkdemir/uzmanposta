@@ -736,17 +736,19 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                             with ThreadPoolExecutor(
                                     max_workers=self.config.max_parallel_details
                             ) as thread_executor:
-                                futures = [thread_executor.submit(
-                                               self.retrieve_detailed_log, d['queue_id'],
-                                               d['time']) for d in chunk_details]
+                                # Create futures mapped to their queue_ids
+                                futures_with_ids = [
+                                    (thread_executor.submit(self.retrieve_detailed_log, d['queue_id'], d['time']), d['queue_id'])
+                                    for d in chunk_details
+                                ]
 
                                 batch_results = []
-                                for batch_future in futures:
+                                for batch_future, qid in futures_with_ids:
                                     try:
                                         batch_results.append(batch_future.result())
                                     except Exception as e:
                                         self.log_error(
-                                            f"Failed to retrieve detailed log (summary fallback): {e}")
+                                            f"Failed to retrieve detailed log for queue_id {qid} (summary fallback): {e}")
                                         self.metrics.errors_count += 1
                                         batch_results.append(None)
 
