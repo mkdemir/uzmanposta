@@ -700,16 +700,9 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                             queue_id = item.get('queue_id')
                             recipients = item.get('recipients', [])
 
-                            if queue_id:
-                                # Resolve time: try recipients first, then fallback to item.get('time')
-                                queue_id_time = None
-                                if recipients:
-                                    queue_id_time = recipients[0].get('time')
-                                
-                                # Fallback to item level time if recipients didn't provide one
-                                if not queue_id_time:
-                                    queue_id_time = item.get('time') or item.get('timestamp')
-
+                            if queue_id and recipients:
+                                recipient = recipients[0]
+                                queue_id_time = recipient.get('time')
                                 if queue_id_time:
                                     processing_sequence.append(('job', len(job_details)))
                                     # Store original item as fallback
