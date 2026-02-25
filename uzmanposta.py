@@ -239,12 +239,11 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         try:
             error_json = response.json()
             if isinstance(error_json, dict):
-                # Fields to extract from the error body
-                fields = ['status', 'code', 'message', 'api-version', 'extended-code-text', 'link']
                 details = []
-                for fld in fields:
-                    if fld in error_json:
-                        details.append(f"{fld}: {error_json[fld]}")
+                for key, value in error_json.items():
+                    # Skip nested complex structures to keep log clean
+                    if not isinstance(value, (dict, list)):
+                        details.append(f"{key}: {value}")
 
                 if details:
                     error_details.append(" | ".join(details))
@@ -701,9 +700,16 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                             queue_id = item.get('queue_id')
                             recipients = item.get('recipients', [])
 
-                            if queue_id and recipients:
-                                recipient = recipients[0]
-                                queue_id_time = recipient.get('time')
+                            if queue_id:
+                                # Resolve time: try recipients first, then fallback to item.get('time')
+                                queue_id_time = None
+                                if recipients:
+                                    queue_id_time = recipients[0].get('time')
+                                
+                                # Fallback to item level time if recipients didn't provide one
+                                if not queue_id_time:
+                                    queue_id_time = item.get('time') or item.get('timestamp')
+
                                 if queue_id_time:
                                     processing_sequence.append(('job', len(job_details)))
                                     # Store original item as fallback
