@@ -955,13 +955,6 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                     self.log_error(f"JSON decode error: {response.text}", request_info=response.url)
                     raise
                 # Successful retrieval
-                # List of fields to remove from the detailed log
-                fields_to_remove = ['logs', 'transactions', 'filters', 'emails']
-
-                # Remove specified fields from the detailed log
-                for fld in fields_to_remove:
-                    if fld in detailed_log:
-                        del detailed_log[fld]
                 return detailed_log
 
             except requests.exceptions.HTTPError as http_error:
