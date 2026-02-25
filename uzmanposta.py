@@ -706,7 +706,12 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                                 queue_id_time = recipient.get('time')
                                 if queue_id_time:
                                     processing_sequence.append(('job', len(job_details)))
-                                    job_details.append((queue_id, queue_id_time))
+                                    # Store original item as fallback
+                                    job_details.append({
+                                        'queue_id': queue_id,
+                                        'time': queue_id_time,
+                                        'original': item
+                                    })
                                     total_jobs_in_page += 1
                                     continue
 
@@ -733,22 +738,27 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                                     max_workers=self.config.max_parallel_details
                             ) as thread_executor:
                                 futures = [thread_executor.submit(
-                                               self.retrieve_detailed_log, d[0],
-                                               d[1]) for d in chunk_details]
+                                               self.retrieve_detailed_log, d['queue_id'],
+                                               d['time']) for d in chunk_details]
 
                                 batch_results = []
                                 for batch_future in futures:
                                     try:
                                         batch_results.append(batch_future.result())
                                     except Exception as e:
-                                        self.log_error(f"Failed to retrieve detailed log: {e}")
+                                        self.log_error(
+                                            f"Failed to retrieve detailed log (summary fallback): {e}")
                                         self.metrics.errors_count += 1
-                                        raise
+                                        batch_results.append(None)
 
-                                # Update job_details with actual log data
+                                # Update job_details with actual log data or fallback
                                 for idx_in_chunk, result_log in enumerate(batch_results):
                                     actual_idx = chunk_indices[idx_in_chunk]
-                                    job_details[actual_idx] = result_log
+                                    if result_log:
+                                        job_details[actual_idx] = result_log
+                                    else:
+                                        # Use stored original summary log as fallback
+                                        job_details[actual_idx] = job_details[actual_idx]['original']
 
                             # Update progress
                             current_completed = min(i + sub_batch_size, total_jobs_in_page)
