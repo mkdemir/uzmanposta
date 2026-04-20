@@ -82,7 +82,7 @@ UzmanPosta Mail Logger, Uzman Posta API'sinden mail, quarantine ve authenticatio
 | **Config Yükleme** | start_time | >= 0 | `max(0, value)` ile düzeltilir |
 | **Lock Alma** | Instance kontrolü | Lock dosyası yok | Section atlanır |
 | **Position Okuma** | Dosya erişimi | Okunabilir | `PermissionError` fırlatır |
-| **Position Okuma** | Değer formatı | Geçerli integer | `None` döner, config start_time kullanılır |
+| **Position Okuma** | Değer formatı | Geçerli negatif olmayan integer | `ValueError` fırlatır, çalışma durur |
 | **Zaman Kontrolü** | Aralık geçerliliği | start_time < end_time | Log toplama atlanır |
 | **API Çağrısı** | HTTP yanıtı | 2xx status | Retry mekanizması devreye girer |
 | **API Çağrısı** | JSON formatı | Geçerli JSON | `ValueError` - Retry |
@@ -107,12 +107,19 @@ MailLoggerConfig
 ├── api_category: str = 'mail'      # Kategori (mail/quarantine/authentication)
 ├── split_interval: int = 300       # Chunk boyutu (saniye)
 ├── max_time_gap: int = 3600        # Maksimum zaman aralığı
+├── end_time_lag_seconds: int = 60  # En yeni loglar için güvenlik gecikmesi
+├── overlap_seconds: int = 5        # Position sınırında geri okuma penceresi
 ├── verbose: bool = True            # Detaylı çıktı
 ├── list_retries: int = 10          # Liste API retry sayısı
 ├── detail_retries: int = 10        # Detay API retry sayısı
 ├── max_records_per_page: int = 1000 # Sayfa başına maksimum kayıt
 ├── max_parallel_details: int = 2   # Paralel detay isteği sayısı
-└── use_session: bool = True        # HTTP session kullanımı
+├── use_session: bool = True        # HTTP session kullanımı
+├── debug_http: bool = False        # HTTP request debug logları
+├── debug_http_response: bool = False # HTTP response metadata debug logları
+├── debug_http_response_body: bool = False # Response body debug loglarına dahil edilir
+├── debug_http_include_sensitive: bool = False # Hassas headerları maskelemeden logla
+└── debug_http_body_limit: int = 4096 # Debug body karakter limiti
 ```
 
 ### Metrics (Dataclass)
@@ -205,8 +212,8 @@ output/
 | Kategori | URL | Açıklama |
 |----------|-----|----------|
 | mail | `https://yenipanel-api.uzmanposta.com/api/v2/logs/mail` | Gelen/giden mail logları |
-| quarantine | `https://yenipanel-api.uzmanposta.com/api/v2/quarantines` | Karantina logları |
-| authentication | `https://yenipanel.uzmanposta.com/api/v2/logs/authentication` | Oturum açma logları |
+| quarantine | `https://yenipanel.uzmanposta.com/api/v2/queue` | Karantina logları |
+| authentication | `https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication` | Oturum açma logları |
 
 ### İstek Parametreleri
 
@@ -260,6 +267,10 @@ Aralık [s, e] → max_records_per_page kadar kayıt
     └── Her birini ayrı ayrı işle
 ```
 
+Aralık artık bölünemiyorsa (`e - s <= 1`) ve API yine maksimum kayıt döndürüyorsa,
+betik `UnsafePaginationError` ile durur ve pozisyonu ileri taşımaz. Bu davranış,
+aynı saniye içinde daha fazla kayıt olabileceği durumda log atlamayı önlemek içindir.
+
 ### Graceful Shutdown
 
 - `Ctrl+C` sinyali yakalanır
@@ -276,6 +287,8 @@ Aralık [s, e] → max_records_per_page kadar kayıt
 [DEFAULT]
 log_directory = ./output
 max_records_per_page = 1000
+end_time_lag_seconds = 60
+overlap_seconds = 5
 verbose = True
 
 [MailLogger:example-incoming]

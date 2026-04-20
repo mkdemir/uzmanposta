@@ -26,8 +26,9 @@ import threading
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import urlparse
-from typing import Optional, List, Dict, Any, Tuple
+from enum import Enum
+from urllib.parse import quote, urljoin, urlparse
+from typing import Optional, List, Dict, Any, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests  # pylint: disable=import-error
 
@@ -35,6 +36,39 @@ if os.name == 'nt':
     import msvcrt # pylint: disable=import-error
 else:
     import fcntl # pylint: disable=import-error
+
+
+DEFAULT_API_URLS: Dict[str, str] = {
+    'mail': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/mail',
+    'quarantine': 'https://yenipanel.uzmanposta.com/api/v2/queue',
+    'authentication': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/authentication'
+}
+
+VALID_LOG_TYPES_BY_CATEGORY: Dict[str, Tuple[str, ...]] = {
+    'mail': ('incominglog', 'outgoinglog'),
+    'quarantine': ('quarantine', 'hold'),
+    'authentication': ()
+}
+
+SENSITIVE_HEADER_NAMES = {
+    'authorization',
+    'proxy-authorization',
+    'cookie',
+    'set-cookie',
+    'x-api-key',
+    'api-key'
+}
+
+
+class SectionRunStatus(str, Enum):
+    """Result of running a single config section."""
+    SUCCESS = 'success'
+    SKIPPED = 'skipped'
+    FAILED = 'failed'
+
+
+class UnsafePaginationError(RuntimeError):
+    """Raised when advancing position could skip logs because the API page is full."""
 
 
 @dataclass
@@ -56,6 +90,8 @@ class MailLoggerConfig: # pylint: disable=too-many-instance-attributes
     api_category: str = 'mail'  # mail, quarantine, authentication
     split_interval: int = 300
     max_time_gap: int = 3600
+    end_time_lag_seconds: int = 60
+    overlap_seconds: int = 5
     verbose: bool = True
     message_log_file_name: str = 'messages_%Y-%m-%d_%H.log'
     message_log_retention_count: int = 2
@@ -73,6 +109,11 @@ class MailLoggerConfig: # pylint: disable=too-many-instance-attributes
     section_name: str = ''
     max_parallel_details: int = 2
     use_session: bool = True
+    debug_http: bool = False
+    debug_http_response: bool = False
+    debug_http_response_body: bool = False
+    debug_http_include_sensitive: bool = False
+    debug_http_body_limit: int = 4096
 
 
 
@@ -86,24 +127,38 @@ class Metrics:
     min_api_time: float = float('inf')
     max_api_time: float = 0.0
     start_time: float = field(default_factory=time.perf_counter)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def record_api_call(self, duration: float) -> None:
         """Record an API call with its duration."""
-        self.api_calls += 1
-        self.total_api_time += duration
-        self.min_api_time = min(self.min_api_time, duration)
-        self.max_api_time = max(self.max_api_time, duration)
+        with self._lock:
+            self.api_calls += 1
+            self.total_api_time += duration
+            self.min_api_time = min(self.min_api_time, duration)
+            self.max_api_time = max(self.max_api_time, duration)
+
+    def record_log_processed(self, count: int = 1) -> None:
+        """Record processed log entries."""
+        with self._lock:
+            self.logs_processed += count
+
+    def record_error(self, count: int = 1) -> None:
+        """Record processing or API errors."""
+        with self._lock:
+            self.errors_count += count
 
     @property
     def avg_api_time(self) -> float:
         """Calculate average API response time."""
-        return self.total_api_time / self.api_calls if self.api_calls > 0 else 0.0
+        with self._lock:
+            return self.total_api_time / self.api_calls if self.api_calls > 0 else 0.0
 
     @property
     def error_rate(self) -> float:
         """Calculate error rate as percentage."""
-        total = self.logs_processed + self.errors_count
-        return (self.errors_count / total * 100) if total > 0 else 0.0
+        with self._lock:
+            total = self.logs_processed + self.errors_count
+            return (self.errors_count / total * 100) if total > 0 else 0.0
 
     @property
     def elapsed_time(self) -> float:
@@ -113,29 +168,47 @@ class Metrics:
     @property
     def logs_per_second(self) -> float:
         """Calculate throughput as logs per second."""
-        return self.logs_processed / self.elapsed_time if self.elapsed_time > 0 else 0.0
+        elapsed_time = self.elapsed_time
+        with self._lock:
+            return self.logs_processed / elapsed_time if elapsed_time > 0 else 0.0
 
     @property
     def avg_logs_per_api_call(self) -> float:
         """Calculate average logs retrieved per API call."""
-        return self.logs_processed / self.api_calls if self.api_calls > 0 else 0.0
+        with self._lock:
+            return self.logs_processed / self.api_calls if self.api_calls > 0 else 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert metrics to dictionary for serialization."""
+        elapsed_time = self.elapsed_time
+        with self._lock:
+            avg_api_time = self.total_api_time / self.api_calls if self.api_calls > 0 else 0.0
+            error_total = self.logs_processed + self.errors_count
+            error_rate = (self.errors_count / error_total * 100) if error_total > 0 else 0.0
+            logs_per_second = self.logs_processed / elapsed_time if elapsed_time > 0 else 0.0
+            avg_logs_per_api_call = (
+                self.logs_processed / self.api_calls if self.api_calls > 0 else 0.0
+            )
+            min_api_time = self.min_api_time
+            max_api_time = self.max_api_time
+            logs_processed = self.logs_processed
+            errors_count = self.errors_count
+            api_calls = self.api_calls
+
         return {
-            'logs_processed': self.logs_processed,
-            'errors_count': self.errors_count,
-            'api_calls': self.api_calls,
-            'avg_api_time_ms': round(self.avg_api_time * 1000, 2),
+            'logs_processed': logs_processed,
+            'errors_count': errors_count,
+            'api_calls': api_calls,
+            'avg_api_time_ms': round(avg_api_time * 1000, 2),
             'min_api_time_ms': (
-                round(self.min_api_time * 1000, 2)
-                if self.min_api_time != float('inf') else 0.0
+                round(min_api_time * 1000, 2)
+                if min_api_time != float('inf') else 0.0
             ),
-            'max_api_time_ms': round(self.max_api_time * 1000, 2),
-            'error_rate_percent': round(self.error_rate, 2),
-            'elapsed_time_seconds': round(self.elapsed_time, 2),
-            'logs_per_second': round(self.logs_per_second, 3),
-            'avg_logs_per_api_call': round(self.avg_logs_per_api_call, 2)
+            'max_api_time_ms': round(max_api_time * 1000, 2),
+            'error_rate_percent': round(error_rate, 2),
+            'elapsed_time_seconds': round(elapsed_time, 2),
+            'logs_per_second': round(logs_per_second, 3),
+            'avg_logs_per_api_call': round(avg_logs_per_api_call, 2)
         }
 
 
@@ -163,6 +236,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         """
         self.config = cfg
         self.metrics = Metrics()
+        self._seen_log_keys: Set[str] = set()
 
         # Ensure directories exist
         os.makedirs(self.config.log_directory, exist_ok=True)
@@ -181,6 +255,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         # Initialize session and headers
         self.auth_headers = {'Authorization': f'Bearer {self.config.api_key}'}
         self.session = requests.Session() if self.config.use_session else None
+        self._session_owner_thread_id = threading.get_ident()
         if self.session:
             self.session.headers.update(self.auth_headers)
 
@@ -192,6 +267,198 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                 self.log_message("Session closed")
             except Exception: # pylint: disable=broad-exception-caught
                 pass
+
+    def _mask_header_value(self, value: str) -> str:
+        """Mask sensitive HTTP header values for debug logs."""
+        if self.config.debug_http_include_sensitive:
+            return value
+        if not value or len(value) <= 8:
+            return '***'
+        if value.lower().startswith('bearer '):
+            token = value[7:]
+            return f"Bearer {self._mask_api_key(token)}"
+        return f"{value[:4]}...{value[-4:]}"
+
+    def _sanitize_headers(self, headers: Any) -> Dict[str, str]:
+        """Return headers with sensitive values masked unless explicitly allowed."""
+        sanitized: Dict[str, str] = {}
+        if not headers:
+            return sanitized
+        for key, value in dict(headers).items():
+            value_text = str(value)
+            if key.lower() in SENSITIVE_HEADER_NAMES:
+                sanitized[key] = self._mask_header_value(value_text)
+            else:
+                sanitized[key] = value_text
+        return sanitized
+
+    def _format_debug_body(self, body: Any) -> Optional[str]:
+        """Convert request body to a bounded string for HTTP debug logging."""
+        if body is None:
+            return None
+        if isinstance(body, bytes):
+            body_text = body.decode('utf-8', errors='replace')
+        else:
+            body_text = str(body)
+
+        limit = self.config.debug_http_body_limit
+        if limit == 0:
+            return ''
+        if len(body_text) > limit:
+            remaining = len(body_text) - limit
+            return f"{body_text[:limit]}...<truncated {remaining} chars>"
+        return body_text
+
+    @staticmethod
+    def _duration_ms(duration: Optional[float]) -> Optional[float]:
+        """Format a duration in seconds as milliseconds for logs."""
+        return round(duration * 1000, 2) if duration is not None else None
+
+    def _log_http_request_debug(
+            self,
+            *,
+            method: str,
+            url: str,
+            headers: Any,
+            params: Optional[Dict[str, Any]] = None,
+            body: Any = None,
+            error: Optional[str] = None) -> None:
+        """Log request details when config debug_http is enabled."""
+        if not self.config.debug_http:
+            return
+
+        debug_data: Dict[str, Any] = {
+            'event': 'http_request_debug',
+            'method': method,
+            'url': url,
+            'headers': self._sanitize_headers(headers),
+            'body': self._format_debug_body(body)
+        }
+        if params:
+            debug_data['params'] = params
+        if error:
+            debug_data['error'] = error
+
+        self.log_message(json.dumps(debug_data, ensure_ascii=False, default=str))
+
+    def _log_http_response_debug(
+            self,
+            response: requests.Response,
+            duration: Optional[float] = None) -> None:
+        """Log response details when config debug_http_response is enabled."""
+        if not self.config.debug_http_response:
+            return
+
+        debug_data: Dict[str, Any] = {
+            'event': 'http_response_debug',
+            'method': response.request.method if response.request else None,
+            'url': response.url,
+            'status_code': response.status_code,
+            'reason': response.reason,
+            'headers': self._sanitize_headers(response.headers),
+            'content_type': response.headers.get('Content-Type'),
+            'content_length': response.headers.get('Content-Length'),
+            'elapsed_ms': self._duration_ms(duration),
+            'body': (
+                self._format_debug_body(response.text)
+                if self.config.debug_http_response_body else None
+            )
+        }
+
+        self.log_message(json.dumps(debug_data, ensure_ascii=False, default=str))
+
+    def _build_detail_log_url(self, queue_id: str) -> str:
+        """Build a safe detail URL for a queue_id path segment."""
+        base_url = self.config.url.rstrip('/') + '/'
+        return urljoin(base_url, quote(str(queue_id), safe=''))
+
+    def _extract_log_time(self, item: Dict[str, Any]) -> Optional[int]:
+        """Extract the best available event timestamp from an API log item."""
+        item_time = None
+        if self.config.api_category == 'mail':
+            recipients = item.get('recipients', [])
+            if recipients:
+                item_time = recipients[0].get('time')
+            elif 'time' in item:
+                item_time = item.get('time')
+        else:
+            item_time = item.get('time') or item.get('timestamp') or item.get('starttime')
+
+        if item_time is None:
+            return None
+        try:
+            return int(item_time)
+        except (TypeError, ValueError):
+            return None
+
+    def _make_log_key(self, item: Dict[str, Any]) -> str:
+        """Build a stable in-run dedupe key for overlap and boundary rereads."""
+        queue_id = item.get('queue_id') or item.get('id') or item.get('message_id')
+        item_time = self._extract_log_time(item)
+        if queue_id is not None:
+            return (
+                f"{self.config.api_category}|{self.config.log_type}|"
+                f"{self.config.domain}|{queue_id}|{item_time}"
+            )
+        return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _get(
+            self,
+            url: str,
+            *,
+            params: Optional[Dict[str, Any]] = None,
+            timeout: Optional[int] = None) -> requests.Response:
+        """
+        Execute a GET request without sharing requests.Session across worker threads.
+
+        The owner thread keeps using the configured Session for connection pooling.
+        Detail workers fall back to stateless requests.get because requests.Session
+        should not be treated as thread-safe.
+        """
+        request_elapsed: Optional[float] = None
+        if self.session and threading.get_ident() == self._session_owner_thread_id:
+            try:
+                request_start = time.perf_counter()
+                response = self.session.get(url, params=params, timeout=timeout)
+                request_elapsed = time.perf_counter() - request_start
+            except requests.exceptions.RequestException as exc:
+                request = getattr(exc, 'request', None)
+                if request is not None:
+                    self._log_http_request_debug(
+                        method=request.method, url=request.url,
+                        headers=request.headers, body=request.body,
+                        error=str(exc))
+                else:
+                    self._log_http_request_debug(
+                        method='GET', url=url, headers=self.session.headers,
+                        params=params, error=str(exc))
+                raise
+        else:
+            try:
+                request_start = time.perf_counter()
+                response = requests.get(
+                    url, headers=self.auth_headers, params=params, timeout=timeout)
+                request_elapsed = time.perf_counter() - request_start
+            except requests.exceptions.RequestException as exc:
+                request = getattr(exc, 'request', None)
+                if request is not None:
+                    self._log_http_request_debug(
+                        method=request.method, url=request.url,
+                        headers=request.headers, body=request.body,
+                        error=str(exc))
+                else:
+                    self._log_http_request_debug(
+                        method='GET', url=url, headers=self.auth_headers,
+                        params=params, error=str(exc))
+                raise
+
+        self._log_http_request_debug(
+            method=response.request.method,
+            url=response.request.url,
+            headers=response.request.headers,
+            body=response.request.body)
+        self._log_http_response_debug(response, request_elapsed)
+        return response
 
     def _setup_signal_handlers(self) -> None:
         """Configure signal handlers for graceful shutdown (main thread only)."""
@@ -495,6 +762,10 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             PermissionError: If position directory is not writable
             IOError: If unable to write to position file
         """
+        if not isinstance(endtime, int) or endtime < 0:
+            raise ValueError(
+                f"Position timestamp must be a non-negative integer, got {endtime!r}.")
+
         # Support both relative filenames and explicit directories
         position_dir = os.path.dirname(self.config.position_file)
         if position_dir:
@@ -518,13 +789,20 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             self._safe_replace(temp_file, self.config.position_file)
 
         except (IOError, PermissionError, OSError) as e:
-            self.log_error(f"Failed to save last position (timestamp={endtime}): {e}")
+            message = (
+                f"Failed to save last position to '{self.config.position_file}' "
+                f"(timestamp={endtime}): {e}"
+            )
+            self.log_error(message)
             # Clean up temp file if it exists
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
-                except Exception: # pylint: disable=broad-exception-caught
-                    pass
+                except Exception as cleanup_error: # pylint: disable=broad-exception-caught
+                    self.log_error(
+                        f"Failed to remove temporary position file '{temp_file}': "
+                        f"{cleanup_error}")
+            raise type(e)(message) from e
 
     def load_last_position(self) -> Optional[int]:
         """
@@ -543,9 +821,26 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                     f"Position file '{self.config.position_file}' is not readable.")
             try:
                 with open(self.config.position_file, 'r', encoding='utf-8') as file:
-                    return int(file.read().strip())
+                    raw_value = file.read().strip()
+                if raw_value == '':
+                    raise ValueError(
+                        f"Position file '{self.config.position_file}' is empty.")
+                position = int(raw_value)
+                if position < 0:
+                    raise ValueError(
+                        f"Position file '{self.config.position_file}' contains a "
+                        f"negative timestamp: {position}.")
+                return position
+            except ValueError as e:
+                message = (
+                    f"Invalid position file '{self.config.position_file}': {e}"
+                )
+                self.log_error(message)
+                raise ValueError(message) from e
             except IOError as e:
-                self.log_error(f"Failed to load last position: {e}")
+                message = f"Failed to load position file '{self.config.position_file}': {e}"
+                self.log_error(message)
+                raise IOError(message) from e
         return None
 
     def update_heartbeat(self, status: str = "running") -> None:
@@ -592,7 +887,15 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             requests.exceptions.RequestException: If API request fails
             ValueError: If response JSON is invalid
         """
-        effective_start = self.load_last_position() or starttime
+        loaded_position = self.load_last_position()
+        if loaded_position is not None:
+            effective_start = max(0, loaded_position - self.config.overlap_seconds)
+            if self.config.overlap_seconds:
+                self.log_message(
+                    f"Applying {self.config.overlap_seconds}s safety overlap: "
+                    f"position {loaded_position} -> start {effective_start}")
+        else:
+            effective_start = starttime
         # Quarantine search limit: Using 6 days (instead of 7) for a safety margin.
         # Reference: HTTP 406 message "Can make search 7 days before at most"
         max_q_limit = 6 * 24 * 3600
@@ -653,20 +956,16 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                 if self._shutdown_requested:
                     break
 
+                api_elapsed: Optional[float] = None
+                api_start: Optional[float] = None
                 try:
                     self.log_message(
                         f"Attempt {attempt + 1} to retrieve mail logs for range [{s}, {e}]")
 
                     # Track API timing
                     api_start = time.perf_counter()
-                    # Use session if enabled, otherwise direct request with headers
-                    if self.session:
-                        response = self.session.get(
-                            self.config.url, params=params, timeout=self.config.list_timeout)
-                    else:
-                        response = requests.get(
-                            self.config.url, headers=self.auth_headers, params=params,
-                            timeout=self.config.list_timeout)
+                    response = self._get(
+                        self.config.url, params=params, timeout=self.config.list_timeout)
                     api_elapsed = time.perf_counter() - api_start
                     self.metrics.record_api_call(api_elapsed)
 
@@ -681,6 +980,13 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                     self.log_message(f"Retrieved {count_all} logs for range [{s}, {e}]")
 
                     # If page is full, split the interval iteratively
+                    if count_all >= self.config.max_records_per_page and e - s <= 1:
+                        raise UnsafePaginationError(
+                            f"API returned {count_all} records for indivisible range "
+                            f"[{s}, {e}] (max_records_per_page="
+                            f"{self.config.max_records_per_page}). Refusing to advance "
+                            "position because additional logs may exist in the same second.")
+
                     if count_all >= self.config.max_records_per_page and e - s > 1:
                         mid = (s + e) // 2
                         self.log_message(
@@ -749,7 +1055,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                                     except Exception as e:
                                         self.log_error(
                                             f"Failed to retrieve detailed log for queue_id {qid} (summary fallback): {e}")
-                                        self.metrics.errors_count += 1
+                                        self.metrics.record_error()
                                         batch_results.append(None)
 
                                 # Update job_details with actual log data or fallback
@@ -781,26 +1087,20 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                             if not item:
                                 continue
 
-                            # Extract timestamp for position update
-                            item_time = None
-                            if self.config.api_category == 'mail':
-                                # Mail log structure
-                                recipients = item.get('recipients', [])
-                                if recipients:
-                                    item_time = recipients[0].get('time')
-                                elif 'time' in item:
-                                    item_time = item.get('time')
-                            else:
-                                # Use timestamp or time for Quarantine/Auth
-                                item_time = item.get('time') or item.get(
-                                    'timestamp') or item.get('starttime')
+                            log_key = self._make_log_key(item)
+                            if log_key in self._seen_log_keys:
+                                continue
+                            self._seen_log_keys.add(log_key)
 
-                            if item_time:
+                            # Extract timestamp for position update
+                            item_time = self._extract_log_time(item)
+
+                            if item_time is not None:
                                 last_processed_time = item_time
 
                             buffer.append(item)
                             total_processed += 1
-                            self.metrics.logs_processed += 1
+                            self.metrics.record_log_processed()
 
                             # Periodically write buffer to disk
                             if len(buffer) >= chunk_size:
@@ -814,13 +1114,13 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
 
                 except requests.exceptions.HTTPError as http_error:
                     attempt += 1
-                    self.metrics.errors_count += 1
+                    self.metrics.record_error()
                     detailed_error = self._parse_api_error(http_error.response)
                     url_with_params = (
                         http_error.response.url if http_error.response is not None
                         else self.config.url
                     )
-                    duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                    duration_ms = self._duration_ms(api_elapsed)
 
                     # HTTP 429 Rate Limit handling
                     if http_error.response is not None and http_error.response.status_code == 429:
@@ -859,11 +1159,13 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                         MailLogger._shutdown_event.wait(delay)
                 except requests.exceptions.RequestException as req_error:
                     attempt += 1
-                    self.metrics.errors_count += 1
+                    self.metrics.record_error()
+                    if api_elapsed is None and api_start is not None:
+                        api_elapsed = time.perf_counter() - api_start
                     failed_url = getattr(
                         req_error.request, 'url', self.config.url) if hasattr(
                         req_error, 'request') else self.config.url
-                    duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                    duration_ms = self._duration_ms(api_elapsed)
 
                     # Classify the connection error
                     error_label = self._classify_connection_error(req_error, failed_url)
@@ -877,12 +1179,16 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                         MailLogger._shutdown_event.wait(delay)
                 except ValueError:
                     raise
+                except UnsafePaginationError as pagination_error:
+                    self.metrics.record_error()
+                    self.log_error(str(pagination_error), request_info=self.config.url)
+                    raise
                 except Exception as unexpected_error: # pylint: disable=broad-exception-caught
                     self.log_error(
                         f"Unexpected error: {unexpected_error}", request_info=self.config.url)
                     self.save_last_position(last_processed_time)
                     buffer.clear()
-                    self.metrics.errors_count += 1
+                    self.metrics.record_error()
                     raise
 
             if is_successful:
@@ -934,19 +1240,18 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         """
         retries = retries or self.config.detail_retries
         sleep_time = sleep_time or self.config.detail_sleep_time
-        detailed_log_url = f'{self.config.url}/{queue_id}?time={event_time}'
+        detailed_log_url = self._build_detail_log_url(queue_id)
         attempt = 0
         while attempt < retries:
+            api_elapsed: Optional[float] = None
+            api_start: Optional[float] = None
             try:
                 # Track API timing
                 api_start = time.perf_counter()
-                if self.session:
-                    response = self.session.get(
-                        detailed_log_url, timeout=self.config.detail_timeout)
-                else:
-                    response = requests.get(
-                        detailed_log_url, headers=self.auth_headers,
-                        timeout=self.config.detail_timeout)
+                response = self._get(
+                    detailed_log_url,
+                    params={'time': event_time},
+                    timeout=self.config.detail_timeout)
                 api_elapsed = time.perf_counter() - api_start
                 self.metrics.record_api_call(api_elapsed)
 
@@ -966,7 +1271,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                     http_error.response.url if http_error.response is not None
                     else detailed_log_url
                 )
-                duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                duration_ms = self._duration_ms(api_elapsed)
 
                 # HTTP 429 Rate Limit handling
                 if http_error.response is not None and http_error.response.status_code == 429:
@@ -998,7 +1303,9 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
                     raise
             except Exception as detail_error: # pylint: disable=broad-exception-caught
                 attempt += 1
-                duration_ms = round(api_elapsed * 1000, 2) if 'api_elapsed' in dir() else None
+                if api_elapsed is None and api_start is not None:
+                    api_elapsed = time.perf_counter() - api_start
+                duration_ms = self._duration_ms(api_elapsed)
                 if attempt < retries:
                     MailLogger._shutdown_event.wait(sleep_time)
                 else:
@@ -1155,10 +1462,12 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
         Uses `max_time_gap` as the chunk size for each API request. Updates
         position tracking after each successful interval retrieval.
         """
-        endtime = int(datetime.now().timestamp())  # Get the current time as Unix timestamp
+        now_ts = int(datetime.now().timestamp())
+        endtime = max(0, now_ts - self.config.end_time_lag_seconds)
         self.log_message(
             f"End time: {endtime} ("
-            f"{datetime.fromtimestamp(endtime).strftime('%Y-%m-%d %H:%M:%S')})")
+            f"{datetime.fromtimestamp(endtime).strftime('%Y-%m-%d %H:%M:%S')}), "
+            f"lag: {self.config.end_time_lag_seconds}s")
         last_position = self.load_last_position()
         if last_position is not None:
             start_time = last_position
@@ -1346,6 +1655,7 @@ class MailLogger: # pylint: disable=too-many-instance-attributes
             Exception: If any error occurs during execution
         """
         try:
+            self._seen_log_keys.clear()
             self.update_heartbeat("running")
             self.split_and_retrieve_logs()
             self.log_metrics_summary()
@@ -1368,6 +1678,103 @@ def get_section_suffix(section_name: str) -> str:
     return 'default'
 
 
+def get_local_section_option(
+        cfg: configparser.ConfigParser,
+        section_name: str,
+        option_name: str) -> Optional[str]:
+    """
+    Return an option only when it is explicitly defined in the section.
+
+    ConfigParser.has_option() includes DEFAULT values, which is not suitable for
+    category-specific URL resolution.
+    """
+    if not cfg.has_section(section_name):
+        return None
+
+    section_options = cfg._sections.get(section_name, {})  # pylint: disable=protected-access
+    option_key = cfg.optionxform(option_name)
+    if option_key not in section_options:
+        return None
+
+    value = section_options[option_key]
+    return '' if value is None else str(value)
+
+
+def validate_choice(
+        section_name: str,
+        option_name: str,
+        value: str,
+        allowed_values: Tuple[str, ...]) -> None:
+    """Validate an option against a fixed set of allowed string values."""
+    if value not in allowed_values:
+        allowed = ', '.join(allowed_values)
+        raise ValueError(
+            f"Section {section_name}: '{option_name}' must be one of "
+            f"[{allowed}], got '{value}'.")
+
+
+def validate_min_int(
+        section_name: str,
+        option_name: str,
+        value: int,
+        minimum: int) -> None:
+    """Validate that an integer config option is greater than or equal to minimum."""
+    if value < minimum:
+        raise ValueError(
+            f"Section {section_name}: '{option_name}' must be >= {minimum}, got {value}.")
+
+
+def validate_url(section_name: str, url: str) -> None:
+    """Validate that an API URL has an HTTP(S) scheme and hostname."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        raise ValueError(
+            f"Section {section_name}: 'url' must be an absolute http(s) URL, got '{url}'.")
+
+
+def find_duplicate_config_options(config_file: str) -> List[Tuple[str, str, int]]:
+    """
+    Find duplicate options in the same INI section before loading with strict=False.
+
+    ConfigParser can tolerate duplicates when strict=False, but warning about them
+    keeps accidental copy/paste mistakes visible. Continuation lines are ignored.
+    """
+    duplicates: List[Tuple[str, str, int]] = []
+    seen: Dict[str, set] = {}
+    current_section = 'DEFAULT'
+    seen[current_section] = set()
+
+    with open(config_file, 'r', encoding='utf-8-sig') as cfg_file:
+        for line_no, raw_line in enumerate(cfg_file, start=1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith(('#', ';')):
+                continue
+            if raw_line[:1].isspace():
+                continue
+            if stripped.startswith('[') and ']' in stripped:
+                current_section = stripped[1:stripped.index(']')].strip()
+                seen.setdefault(current_section, set())
+                continue
+
+            equals_pos = stripped.find('=')
+            colon_pos = stripped.find(':')
+            delimiters = [pos for pos in (equals_pos, colon_pos) if pos >= 0]
+            if not delimiters:
+                continue
+
+            delimiter_pos = min(delimiters)
+            option_name = stripped[:delimiter_pos].strip().lower()
+            if not option_name:
+                continue
+
+            if option_name in seen[current_section]:
+                duplicates.append((current_section, option_name, line_no))
+            else:
+                seen[current_section].add(option_name)
+
+    return duplicates
+
+
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 def create_config_for_section(
         cfg: configparser.ConfigParser,
@@ -1379,52 +1786,45 @@ def create_config_for_section(
     sect_script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Read values with fallbacks from DEFAULT section
-    api_key = cfg.get(section_name, 'api_key')
+    api_key = cfg.get(section_name, 'api_key').strip()
 
     # Validate: API key cannot be empty
-    if not api_key or api_key.strip() == '' or api_key == 'YOUR_API_KEY_HERE':
+    if not api_key or api_key == 'YOUR_API_KEY_HERE':
         raise ValueError(
             f"Section {section_name}: 'api_key' is required and "
             f"cannot be empty or placeholder.")
 
-    domain = cfg.get(section_name, 'domain', fallback='')
-    log_type = cfg.get(section_name, 'type', fallback='outgoinglog')
-    api_category = cfg.get(section_name, 'category', fallback='mail')
+    domain = cfg.get(section_name, 'domain', fallback='').strip()
+    log_type = cfg.get(section_name, 'type', fallback='outgoinglog').strip().lower()
+    api_category = cfg.get(section_name, 'category', fallback='mail').strip().lower()
 
-    # Determine URL based on category
-    default_urls = {
-        'mail': 'https://yenipanel-api.uzmanposta.com/api/v2/logs/mail',
-        'quarantine': 'https://yenipanel-api.uzmanposta.com/api/v2/quarantines',
-        'authentication': 'https://yenipanel.uzmanposta.com/api/v2/logs/authentication'
-    }
+    validate_choice(section_name, 'category', api_category, tuple(DEFAULT_API_URLS.keys()))
+    allowed_log_types = VALID_LOG_TYPES_BY_CATEGORY[api_category]
+    if allowed_log_types:
+        validate_choice(section_name, 'type', log_type, allowed_log_types)
 
     # Priority:
     # 1. Explicitly set in the SECTION itself (ignore DEFAULT)
     # 2. Category-specific default
     # 3. If category is 'mail' (default), then fallback to [DEFAULT] section's 'url' if any
 
-    url = None
-    # Check if URL is locally defined in this section
-    if cfg.has_section(section_name) and cfg.has_option(section_name, 'url'):
-        url = cfg.get(section_name, 'url')
+    url = get_local_section_option(cfg, section_name, 'url')
+    if url is not None:
+        url = url.strip()
 
     if not url:
-        # Use category default
-        url = default_urls.get(api_category, default_urls['mail'])
-
         # Special case for 'mail' category: allow [DEFAULT] url for backward compatibility
         if api_category == 'mail' and cfg.has_option('DEFAULT', 'url'):
-            url = cfg.get('DEFAULT', 'url')
+            url = cfg.get('DEFAULT', 'url').strip() or DEFAULT_API_URLS[api_category]
+        else:
+            url = DEFAULT_API_URLS[api_category]
+
+    validate_url(section_name, url)
 
     # Log resolution detail for diagnostics
     print(
         f"--- CONFIG DEBUG --- Section: {section_name} -> "
         f"Category: {api_category}, URL: {url}")
-
-    if log_type in ['quarantine', 'hold'] and api_category == 'mail':
-        print(
-            f"WARNING: Section {section_name} has type '{log_type}' but "
-            f"category is 'mail'. Did you forget 'category = quarantine'?")
 
     # Resolve log directory: if relative, make it relative to script_dir
     raw_log_dir = cfg.get(section_name, 'log_directory', fallback='./output')
@@ -1504,49 +1904,98 @@ def create_config_for_section(
     else:
         heartbeat_file = f"{suffix}_heartbeat.json"
 
+    start_time = max(
+        0, cfg.getint(section_name, 'start_time',
+                      fallback=int(datetime.now().timestamp()) - 60))
+    split_interval = cfg.getint(section_name, 'split_interval', fallback=300)
+    max_time_gap = cfg.getint(section_name, 'max_time_gap', fallback=3600)
+    end_time_lag_seconds = cfg.getint(section_name, 'end_time_lag_seconds', fallback=60)
+    overlap_seconds = cfg.getint(section_name, 'overlap_seconds', fallback=5)
+    message_log_retention_count = cfg.getint(
+        section_name, 'message_log_retention_count', fallback=2)
+    list_timeout = cfg.getint(section_name, 'list_timeout', fallback=300)
+    detail_timeout = cfg.getint(section_name, 'detail_timeout', fallback=120)
+    list_retries = cfg.getint(section_name, 'list_retries', fallback=10)
+    list_sleep_time = cfg.getint(section_name, 'list_sleep_time', fallback=2)
+    detail_retries = cfg.getint(section_name, 'detail_retries', fallback=10)
+    detail_sleep_time = cfg.getint(section_name, 'detail_sleep_time', fallback=2)
+    max_records_per_page = cfg.getint(
+        section_name, 'max_records_per_page', fallback=1000)
+    max_parallel_details = cfg.getint(section_name, 'max_parallel_details', fallback=2)
+    error_log_retention_count = cfg.getint(
+        section_name, 'error_log_retention_count', fallback=2)
+    debug_http_body_limit = cfg.getint(section_name, 'debug_http_body_limit', fallback=4096)
+
+    validate_min_int(section_name, 'start_time', start_time, 0)
+    validate_min_int(section_name, 'split_interval', split_interval, 0)
+    validate_min_int(section_name, 'max_time_gap', max_time_gap, 1)
+    validate_min_int(section_name, 'end_time_lag_seconds', end_time_lag_seconds, 0)
+    validate_min_int(section_name, 'overlap_seconds', overlap_seconds, 0)
+    validate_min_int(
+        section_name, 'message_log_retention_count', message_log_retention_count, 0)
+    validate_min_int(section_name, 'list_timeout', list_timeout, 1)
+    validate_min_int(section_name, 'detail_timeout', detail_timeout, 1)
+    validate_min_int(section_name, 'list_retries', list_retries, 1)
+    validate_min_int(section_name, 'list_sleep_time', list_sleep_time, 0)
+    validate_min_int(section_name, 'detail_retries', detail_retries, 1)
+    validate_min_int(section_name, 'detail_sleep_time', detail_sleep_time, 0)
+    validate_min_int(section_name, 'max_records_per_page', max_records_per_page, 1)
+    validate_min_int(section_name, 'max_parallel_details', max_parallel_details, 1)
+    validate_min_int(
+        section_name, 'error_log_retention_count', error_log_retention_count, 0)
+    validate_min_int(section_name, 'debug_http_body_limit', debug_http_body_limit, 0)
+
     # Create config dataclass
     mail_config = MailLoggerConfig(
         api_key=api_key, log_directory=log_directory, log_file_name_format=cfg.get(
             section_name, 'log_file_name_format', fallback='{domain}_{type}_%Y-%m-%d_%H.log'),
         position_file=position_file,
-        start_time=max(
-            0, cfg.getint(
-                section_name, 'start_time', fallback=int(datetime.now().timestamp()) - 60)),
+        start_time=start_time,
         domain=domain, url=url, log_type=log_type, api_category=api_category,
-        split_interval=cfg.getint(section_name, 'split_interval', fallback=300),
-        max_time_gap=cfg.getint(section_name, 'max_time_gap', fallback=3600),
+        split_interval=split_interval,
+        max_time_gap=max_time_gap,
+        end_time_lag_seconds=end_time_lag_seconds,
+        overlap_seconds=overlap_seconds,
         verbose=cfg.getboolean(section_name, 'verbose', fallback=True),
         message_log_file_name=cfg.get(
             section_name, 'message_log_file_name', fallback='messages_%Y-%m-%d_%H.log'),
-        message_log_retention_count=cfg.getint(
-            section_name, 'message_log_retention_count', fallback=2),
-        list_timeout=cfg.getint(section_name, 'list_timeout', fallback=300),
-        detail_timeout=cfg.getint(section_name, 'detail_timeout', fallback=120),
-        list_retries=cfg.getint(section_name, 'list_retries', fallback=10),
-        list_sleep_time=cfg.getint(section_name, 'list_sleep_time', fallback=2),
-        detail_retries=cfg.getint(section_name, 'detail_retries', fallback=10),
-        detail_sleep_time=cfg.getint(section_name, 'detail_sleep_time', fallback=2),
-        max_records_per_page=cfg.getint(
-            section_name, 'max_records_per_page', fallback=1000),
+        message_log_retention_count=message_log_retention_count,
+        list_timeout=list_timeout,
+        detail_timeout=detail_timeout,
+        list_retries=list_retries,
+        list_sleep_time=list_sleep_time,
+        detail_retries=detail_retries,
+        detail_sleep_time=detail_sleep_time,
+        max_records_per_page=max_records_per_page,
         heartbeat_file=heartbeat_file, lock_file_path=lock_file_path, section_name=suffix,
-        max_parallel_details=cfg.getint(section_name, 'max_parallel_details', fallback=2),
+        max_parallel_details=max_parallel_details,
         use_session=cfg.getboolean(section_name, 'use_session', fallback=True),
+        debug_http=cfg.getboolean(section_name, 'debug_http', fallback=False),
+        debug_http_response=cfg.getboolean(section_name, 'debug_http_response', fallback=False),
+        debug_http_response_body=cfg.getboolean(
+            section_name, 'debug_http_response_body', fallback=False),
+        debug_http_include_sensitive=cfg.getboolean(
+            section_name, 'debug_http_include_sensitive', fallback=False),
+        debug_http_body_limit=debug_http_body_limit,
         error_log_file_name=cfg.get(
             section_name, 'error_log_file_name', fallback='errors_%Y-%m-%d_%H.log'),
-        error_log_retention_count=cfg.getint(
-            section_name, 'error_log_retention_count', fallback=2),)
+        error_log_retention_count=error_log_retention_count,)
 
     return mail_config, lock_file_path
 
 
-def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
-    """Run a single section. Returns True if successful, False if skipped/failed."""
+def run_section(cfg: configparser.ConfigParser, section_name: str) -> SectionRunStatus:
+    """Run a single section and return an explicit status."""
     try:
         mail_config, lock_file_path = create_config_for_section(cfg, section_name)
 
         # Ensure directories exist (thread-safe)
-        for dir_path in ['./positions', './locks', mail_config.log_directory]:
-            os.makedirs(dir_path, exist_ok=True)
+        for dir_path in [
+                os.path.dirname(mail_config.position_file),
+                os.path.dirname(lock_file_path),
+                mail_config.log_directory]:
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
 
         print(f"[{get_section_suffix(section_name)}] Starting...")
         print(f"[{get_section_suffix(section_name)}] Lock file: {lock_file_path}")
@@ -1555,7 +2004,7 @@ def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
         mail_logger.acquire_lock(lock_file_path)
         try:
             mail_logger.run()
-            return True
+            return SectionRunStatus.SUCCESS
         finally:
             mail_logger.close()
             mail_logger.release_lock()
@@ -1563,10 +2012,10 @@ def run_section(cfg: configparser.ConfigParser, section_name: str) -> bool:
     except SystemExit:
         # Lock already held by another instance
         print(f"[{get_section_suffix(section_name)}] Skipped (already running)")
-        return False
+        return SectionRunStatus.SKIPPED
     except Exception as e: # pylint: disable=broad-exception-caught
         print(f"[{get_section_suffix(section_name)}] Error: {e}")
-        return False
+        return SectionRunStatus.FAILED
 
 
 def main() -> None:
@@ -1587,6 +2036,8 @@ def main() -> None:
         help='Maximum number of parallel workers (default: 5)')
     parser.add_argument('--list', action='store_true', help='List all available sections and exit')
     args = parser.parse_args()
+    if args.max_workers < 1:
+        parser.error("--max-workers must be >= 1")
 
     # Establish script directory for path resolution
     script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -1600,9 +2051,21 @@ def main() -> None:
         print(f"Configuration file '{config_file}' not found.")
         sys.exit(1)
 
+    duplicate_options = find_duplicate_config_options(config_file)
+    if duplicate_options:
+        print(
+            "WARNING: Duplicate options found in config. "
+            "The last value in each section will be used:")
+        for section_name, option_name, line_no in duplicate_options:
+            print(f"  - {config_file}:{line_no} [{section_name}] {option_name}")
+
     # Load configuration from file
-    cfg_parser = configparser.ConfigParser(interpolation=None)
-    cfg_parser.read(config_file, encoding='utf-8-sig')
+    cfg_parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        cfg_parser.read(config_file, encoding='utf-8-sig')
+    except configparser.Error as exc:
+        print(f"Failed to parse configuration file '{config_file}': {exc}")
+        sys.exit(1)
 
     # Discover available sections
     multi_sections = discover_sections(cfg_parser)
@@ -1659,7 +2122,11 @@ def main() -> None:
             sys.exit(1)
 
     # Run sections
-    results = {'success': 0, 'skipped': 0, 'failed': 0}
+    results = {
+        SectionRunStatus.SUCCESS.value: 0,
+        SectionRunStatus.SKIPPED.value: 0,
+        SectionRunStatus.FAILED.value: 0
+    }
 
     try:
         if args.parallel and len(sections_to_run) > 1:
@@ -1679,14 +2146,11 @@ def main() -> None:
                     for future in as_completed(future_to_section):
                         section = future_to_section[future]
                         try:
-                            is_success = future.result()
-                            if is_success:
-                                results['success'] += 1
-                            else:
-                                results['skipped'] += 1
+                            status = future.result()
+                            results[status.value] += 1
                         except Exception as e: # pylint: disable=broad-exception-caught
                             print(f"[{get_section_suffix(section)}] Thread error: {e}")
-                            results['failed'] += 1
+                            results[SectionRunStatus.FAILED.value] += 1
                 except KeyboardInterrupt:
                     print("\nMain thread received Ctrl+C, notifying workers...")
                     MailLogger._shutdown_event.set()  # pylint: disable=protected-access
@@ -1697,11 +2161,8 @@ def main() -> None:
             for section in sections_to_run:
                 if MailLogger._shutdown_event.is_set():  # pylint: disable=protected-access
                     break
-                is_success = run_section(cfg_parser, section)
-                if is_success:
-                    results['success'] += 1
-                else:
-                    results['skipped'] += 1
+                status = run_section(cfg_parser, section)
+                results[status.value] += 1
     except KeyboardInterrupt:
         print("\nShutdown requested via Ctrl+C")
         MailLogger._shutdown_event.set()  # pylint: disable=protected-access
@@ -1709,10 +2170,10 @@ def main() -> None:
     # Print summary if multiple sections
     if len(sections_to_run) > 1:
         print("\n=== Summary ===")
-        print(f"  Completed: {results['success']}/{len(sections_to_run)}")
-        print(f"  Skipped:   {results['skipped']}")
-        if results['failed'] > 0:
-            print(f"  Failed:    {results['failed']}")
+        print(f"  Completed: {results[SectionRunStatus.SUCCESS.value]}/{len(sections_to_run)}")
+        print(f"  Skipped:   {results[SectionRunStatus.SKIPPED.value]}")
+        if results[SectionRunStatus.FAILED.value] > 0:
+            print(f"  Failed:    {results[SectionRunStatus.FAILED.value]}")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@
 - ✅ **Eşzamanlı Detay Çekimi**: Her domain içinde çoklu iş parçacığı (thread) kullanarak detaylı mail loglarını (gönderen, alıcı, durum) hızlıca çeker.
 - ✅ **Çapraz Platform Dayanıklılığı**: Windows'a özgü dosya kilitleme ve atomik yazma sorunları (`[WinError 5]`) için düzeltmeler içerir.
 - ✅ **Cron İçin Optimize Edildi**: Zamanlanmış görevlerde hata oluşmasını önlemek için dahili yollar otomatik olarak betiğin bulunduğu dizine göre çözümlenir.
-- ✅ **Atomik Pozisyon Takibi**: Çökme veya manuel durdurma durumunda bile işleme kaldığı yerden eksiksiz devam eder.
+- ✅ **Atomik Pozisyon Takibi**: Çökme veya manuel durdurma sonrası ayarlanabilir overlap penceresiyle güvenli devam eder.
 - ✅ **Oturum Yönetimi**: `requests.Session` ile kalıcı HTTP bağlantıları (Keep-Alive) kullanır.
 - ✅ **İzleme**: Alan adı bazında gerçek zamanlı kalp atış (heartbeat) dosyaları ve kapsamlı metrikler sunar.
 - ✅ **Güvenlik Odaklı**: API anahtarları, kazara sızıntıları önlemek için log dosyalarında otomatik olarak maskelenir.
@@ -92,11 +92,18 @@ start_time = 1734876000
 | `type` | Log tipi (`incominglog`, `outgoinglog`, `quarantine`, vb.) | `outgoinglog` |
 | `category` | API kategorisi (`mail`, `quarantine`, `authentication`) | `mail` |
 | `start_time` | Logların çekilmeye başlanacağı Unix zaman damgası (belirtilmezse ŞU AN) | `Şu An` |
+| `end_time_lag_seconds` | En yeni logları sorgulamadan önce beklenen güvenlik gecikmesi | `60` |
+| `overlap_seconds` | Sınır atlamalarını azaltmak için kaydedilen pozisyondan geri okunacak saniye | `5` |
 | `log_file_name_format` | Yer tutucularla log dosya formatı | `{domain}_{type}_%Y-%m-%d_%H.log` |
 | `error_log_file_name` | Hata log dosyaları için format | `errors_%Y-%m-%d_%H.log` |
 | `error_log_retention_count` | Saklanacak son hata logu sayısı | `2` |
 | `max_parallel_details` | Domain başına eşzamanlı detay çekme işçi sayısı | `2` |
 | `use_session` | Bağlantı havuzunu (connection pool) etkinleştir | `True` |
+| `debug_http` | Sorun giderme için hazırlanan istek URL, header ve body bilgisini logla | `False` |
+| `debug_http_response` | Response status, header, içerik metadata ve süre bilgisini logla | `False` |
+| `debug_http_response_body` | HTTP response debug loglarına response body bilgisini dahil et | `False` |
+| `debug_http_include_sensitive` | Authorization gibi hassas header değerlerini maskelemeden logla | `False` |
+| `debug_http_body_limit` | Debug loglarına yazılacak maksimum request body karakter sayısı | `4096` |
 
 ## Çıktı Yapısı
 
@@ -131,8 +138,7 @@ Betik, iki ana mekanizma üzerinden gerçek zamanlı izleme sağlar:
 
 1.  **Heartbeat (Kalp Atışı) Dosyaları**: Her bölüm, çıktı dizininde bir `{bölüm}_heartbeat.json` dosyası tutar. Bu dosya şunları içerir:
     - `status`: `running` (çalışıyor), `completed` (tamamlandı) veya `error` (hata).
-    - `last_heartbeat`: Son güncelleme zaman damgası.
-    - `pid`: İşlem kimliği (Process ID).
+    - `last_update`: Son güncelleme zaman damgası.
     - `metrics`: Güncel işleme istatistikleri.
 2.  **Özet İstatistikler**: Her çalışma sonunda aşağıdakileri içeren bir özet loglanır:
     - İşlenen toplam log sayısı.
@@ -144,10 +150,13 @@ Betik, iki ana mekanizma üzerinden gerçek zamanlı izleme sağlar:
 
 ### Pozisyon Takibi
 
-Betik, hiçbir logun kaçırılmamasını veya yinelenmemesini sağlamak için atomik pozisyon takibi kullanır.
+Betik, API indeksleme gecikmesi veya timestamp sınır davranışı nedeniyle log atlama
+riskini azaltmak için atomik pozisyon takibine ek olarak küçük bir gecikme/overlap
+penceresi kullanır.
 
 - **Konum**: `./positions/{bölüm}.pos`
-- **Mekanizma**: Her başarılı toplu yazma işleminden sonra, işlenen son kaydın zaman damgası kaydedilir. Yeniden başlatıldığında, betik tam olarak bu zaman damgasından devam eder.
+- **Mekanizma**: Her başarılı toplu yazma işleminden sonra, işlenen son kaydın zaman damgası kaydedilir. Yeniden başlatıldığında betik bu timestamp'ten `overlap_seconds` kadar geriden okur ve en yeni `end_time_lag_seconds` aralığını sorgu dışında bırakır.
+- **Takas**: Overlap log kaçırmamayı önceliklendirir. Ayrı çalıştırmalar arasında küçük bir kayıt aralığı bilinçli olarak tekrar okunabilir; bu yüzden downstream tarafın event ID veya timestamp tekrarlarına toleranslı olması önerilir.
 
 ### Dosya Kilitleme
 

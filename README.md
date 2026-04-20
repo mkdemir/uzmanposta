@@ -21,7 +21,7 @@ The **Uzman Posta Mail Event Logger** is a production-grade Python script design
 - ✅ **Concurrent Detail Fetching**: Retrieves detailed mail logs (sender, recipient, status) using multi-threaded workers within each domain.
 - ✅ **Cross-Platform Robustness**: Includes Windows-specific fixes for file locking and atomic writes (`[WinError 5]` handling).
 - ✅ **Cron Optimized**: Internal paths are automatically resolved to the script's absolute directory to prevent failures in scheduled tasks.
-- ✅ **Atomic Position Tracking**: Resumes exactly where it left off, even after a crash or manual stop.
+- ✅ **Atomic Position Tracking**: Resumes safely after a crash or manual stop with a configurable overlap window.
 - ✅ **Session Management**: Uses persistent HTTP connections (Keep-Alive) with `requests.Session`.
 - ✅ **Monitoring**: Real-time heartbeat files and comprehensive metrics per domain.
 - ✅ **Security First**: API keys are automatically masked in log files to prevent accidental leakage.
@@ -92,11 +92,18 @@ start_time = 1734876000
 | `type` | Log type (`incominglog`, `outgoinglog`, `quarantine`, etc.) | `outgoinglog` |
 | `category` | API category (`mail`, `quarantine`, `authentication`) | `mail` |
 | `start_time` | Unix timestamp to start fetching logs from (defaults to NOW if missing) | `Current Time` |
+| `end_time_lag_seconds` | Safety delay before querying newest logs, reducing late-indexing skips | `60` |
+| `overlap_seconds` | Re-read seconds before the saved position to avoid boundary skips | `5` |
 | `log_file_name_format` | Format for log files with placeholders | `{domain}_{type}_%Y-%m-%d_%H.log` |
 | `error_log_file_name` | Format for error log files | `errors_%Y-%m-%d_%H.log` |
 | `error_log_retention_count` | Number of recent error logs to keep | `2` |
 | `max_parallel_details` | Concurrent detail fetch workers per domain | `2` |
 | `use_session` | Enable connection pooling | `True` |
+| `debug_http` | Log prepared request URL, headers and body for troubleshooting | `False` |
+| `debug_http_response` | Log response status, headers, content metadata and elapsed time | `False` |
+| `debug_http_response_body` | Include response body in HTTP response debug logs | `False` |
+| `debug_http_include_sensitive` | Include sensitive header values such as Authorization without masking | `False` |
+| `debug_http_body_limit` | Maximum request body characters written to debug logs | `4096` |
 
 ## Output Structure
 
@@ -131,8 +138,7 @@ The script provides real-time monitoring through two main mechanisms:
 
 1.  **Heartbeat Files**: Each section maintains a `{section}_heartbeat.json` file in the output directory, containing:
     - `status`: `running`, `completed`, or `error`.
-    - `last_heartbeat`: Last update timestamp.
-    - `pid`: Process ID.
+    - `last_update`: Last update timestamp.
     - `metrics`: Current processing statistics.
 2.  **Summary Statistics**: At the end of each run, a summary is logged including:
     - Total logs processed.
@@ -144,10 +150,12 @@ The script provides real-time monitoring through two main mechanisms:
 
 ### Position Tracking
 
-The script uses atomic position tracking to ensure no logs are missed or duplicated.
+The script uses atomic position tracking plus a small lag/overlap window to reduce
+the risk of missed logs from API indexing delay or timestamp boundary behavior.
 
 - **Location**: `./positions/{section}.pos`
-- **Mechanism**: After each successful batch write, the timestamp of the last processed record is saved. On restart, the script resumes exactly from this timestamp.
+- **Mechanism**: After each successful batch write, the timestamp of the last processed record is saved. On restart, the script re-reads `overlap_seconds` before this timestamp and keeps the newest `end_time_lag_seconds` outside the query window.
+- **Trade-off**: Overlap favors not missing logs. It can intentionally re-read a small number of records across separate runs, so downstream consumers should tolerate duplicate event IDs or timestamps.
 
 ### File Locking
 
